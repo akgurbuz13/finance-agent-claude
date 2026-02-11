@@ -1,0 +1,16 @@
+{
+  "permissions": {
+    "allow": [
+      "mcp__plugin_context7_context7__resolve-library-id",
+      "mcp__plugin_context7_context7__query-docs",
+      "Bash(for d in agents tools models db telegram_bot scheduler utils)",
+      "Bash(do touch \"/Users/alikaangurbuz/finance-agent_claude/src/portfolio_advisor/$d/__init__.py\")",
+      "Bash(done)",
+      "Bash(for d in test_tools test_agents test_db test_telegram)",
+      "Bash(do touch \"/Users/alikaangurbuz/finance-agent_claude/tests/$d/__init__.py\")",
+      "Bash(chmod:*)",
+      "Bash(python3:*)",
+      "Bash(.venv/bin/pip install:*)"
+    ]
+  }
+}

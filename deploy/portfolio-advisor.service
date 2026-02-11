@@ -1,0 +1,33 @@
+[Unit]
+Description=Portfolio Advisor Agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=portfolio
+Group=portfolio
+WorkingDirectory=/opt/portfolio-advisor
+ExecStart=/opt/portfolio-advisor/.venv/bin/python -m portfolio_advisor.main
+Restart=always
+RestartSec=30
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+# Environment
+EnvironmentFile=/opt/portfolio-advisor/.env
+
+# Security hardening
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/opt/portfolio-advisor/data
+PrivateTmp=yes
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=portfolio-advisor
+
+[Install]
+WantedBy=multi-user.target
