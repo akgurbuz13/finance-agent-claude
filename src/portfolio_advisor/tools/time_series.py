@@ -302,7 +302,6 @@ async def compute_cointegration_test(
 
             # Step 2: ADF test on residuals (spread)
             spread = y - alpha - beta * x
-            n = len(spread)
             dy = np.diff(spread)
             Y = dy[1:]
             X = np.column_stack([spread[1:-1], dy[:-1]])

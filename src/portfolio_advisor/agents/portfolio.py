@@ -5,6 +5,22 @@ from __future__ import annotations
 from agents import Agent
 
 from portfolio_advisor.agents.context import AppContext
+from portfolio_advisor.config import get_settings
+from portfolio_advisor.tools.advanced_portfolio import (
+    compute_kelly_criterion,
+    compute_transaction_costs,
+    optimize_cvar,
+    optimize_entropy_weighted,
+    optimize_hrp,
+    optimize_max_diversification,
+)
+from portfolio_advisor.tools.advanced_risk import (
+    compute_cornish_fisher_var,
+    compute_evt_var,
+    compute_monte_carlo_var,
+    compute_tail_dependence,
+    run_stress_test,
+)
 from portfolio_advisor.tools.portfolio_optimization import (
     apply_risk_controls,
     check_concentration_limits,
@@ -44,32 +60,39 @@ optimal portfolio allocations that respect the user's risk preferences and const
    a. `optimize_risk_parity` — baseline allocation (equal risk contribution).
    b. `optimize_mean_variance` — return-seeking allocation with user's risk tolerance.
    c. `optimize_max_sharpe` — maximum risk-adjusted return portfolio.
-3. **Blend**: Combine the three based on risk tolerance:
-   - Conservative: 70% risk-parity + 20% mean-variance + 10% max-Sharpe
-   - Moderate: 50% risk-parity + 30% mean-variance + 20% max-Sharpe
-   - Aggressive: 20% risk-parity + 30% mean-variance + 50% max-Sharpe
-4. **Apply risk controls**: Call `apply_risk_controls` with the blended weights, \
+   d. `optimize_hrp` — hierarchical risk parity (robust, no optimizer instability).
+   e. `optimize_cvar` — tail-risk-aware optimization (when user is risk-conscious).
+3. **Blend**: Combine based on risk tolerance:
+   - Conservative: 40% risk-parity + 30% HRP + 20% mean-variance + 10% max-Sharpe
+   - Moderate: 30% risk-parity + 20% HRP + 30% mean-variance + 20% max-Sharpe
+   - Aggressive: 15% risk-parity + 15% HRP + 30% mean-variance + 40% max-Sharpe
+4. **Kelly sizing**: Call `compute_kelly_criterion` for position sizing guidance. \
+   Compare half-Kelly sizes with the blended weights — flag large discrepancies.
+5. **Apply risk controls**: Call `apply_risk_controls` with the blended weights, \
    current portfolio, risk metrics, and user preferences.
-5. **Check concentration**: Call `check_concentration_limits` on the final weights.
-6. **Compute portfolio risk**: Call all risk metric tools on the proposed portfolio:
-   - `compute_var` (95% confidence)
+6. **Check concentration**: Call `check_concentration_limits` on the final weights.
+7. **Compute portfolio risk**: Call risk metric tools on the proposed portfolio:
+   - `compute_var` (95% confidence) — historical VaR
+   - `compute_cornish_fisher_var` — skew/kurtosis-adjusted VaR
    - `compute_expected_shortfall` (95% confidence)
    - `compute_max_drawdown`
    - `compute_beta_exposure`
-7. **Validate and finalize**: Ensure total weights + cash = 100%. Ensure no position \
+   - `run_stress_test` — scenario analysis (2008, COVID, 2022)
+8. **Transaction costs**: Call `compute_transaction_costs` to estimate rebalancing cost.
+9. **Validate and finalize**: Ensure total weights + cash = 100%. Ensure no position \
    exceeds max_position_pct. Ensure excluded assets are absent.
 
 # Allocation Rules
 - **Minimum position size**: 2%. Anything below 2% is not worth the complexity — either \
-  allocate meaningfully (≥2%) or don't allocate at all.
+  allocate meaningfully (>=2%) or don't allocate at all.
 - **Maximum position size**: As per user's max_position_pct (default 15%).
 - **Cash floor**: Always maintain at least the user's cash_target_pct (default 10%).
 - **Turnover limit**: In a single rebalance, no single position should change by more \
   than 10 percentage points unless driven by a high-conviction signal.
 - **Asset class diversification**: No more than 60% in any single asset class (equity, \
   bond, commodity, crypto).
-- **Crypto cap**: Never exceed 15% total crypto allocation regardless of risk tolerance.
-- **Bond floor**: Always maintain at least 5% in bonds/fixed-income for stability.
+- **Crypto cap**: Never exceed max_crypto_pct (default 15%) total crypto allocation.
+- **Bond floor**: Always maintain at least min_bond_pct (default 5%) in bonds/fixed-income.
 
 # Change Justification
 Every allocation change of >2% from current weights MUST include a rationale that \
@@ -98,9 +121,7 @@ references at least one of: (a) technical signal change, (b) quant model output,
       "current_weight_pct": 25.0,
       "recommended_weight_pct": 22.0,
       "delta_pct": -3.0,
-      "rationale": "Reducing equity exposure due to elevated vol regime (75th \
-                    percentile) and bearish RSI divergence. Moving 3% to TLT for \
-                    defensive positioning."
+      "rationale": "Reducing equity exposure due to elevated vol regime."
     }
   ],
   "risk_metrics": {
@@ -126,23 +147,53 @@ references at least one of: (a) technical signal change, (b) quant model output,
 - Ensure weights + cash sum to exactly 100.0%.
 """
 
-portfolio_agent = Agent[AppContext](
-    name="Portfolio Construction Agent",
-    model="gpt-5-mini",
-    instructions=PORTFOLIO_AGENT_INSTRUCTIONS,
-    tools=[
-        get_current_portfolio,
-        get_user_preferences,
-        optimize_risk_parity,
-        optimize_mean_variance,
-        optimize_max_sharpe,
-        compute_efficient_frontier,
-        optimize_black_litterman,
-        check_concentration_limits,
-        apply_risk_controls,
-        compute_var,
-        compute_expected_shortfall,
-        compute_max_drawdown,
-        compute_beta_exposure,
-    ],
-)
+_agent: Agent[AppContext] | None = None
+
+
+def get_portfolio_agent() -> Agent[AppContext]:
+    """Lazy-initialize the portfolio agent with config-based model."""
+    global _agent
+    if _agent is None:
+        _agent = Agent[AppContext](
+            name="Portfolio Construction Agent",
+            model=get_settings().model_portfolio,
+            instructions=PORTFOLIO_AGENT_INSTRUCTIONS,
+            tools=[
+                get_current_portfolio,
+                get_user_preferences,
+                # Core optimization
+                optimize_risk_parity,
+                optimize_mean_variance,
+                optimize_max_sharpe,
+                compute_efficient_frontier,
+                optimize_black_litterman,
+                # Advanced optimization
+                optimize_cvar,
+                optimize_hrp,
+                compute_kelly_criterion,
+                optimize_max_diversification,
+                optimize_entropy_weighted,
+                compute_transaction_costs,
+                # Risk controls
+                check_concentration_limits,
+                apply_risk_controls,
+                # Core risk metrics
+                compute_var,
+                compute_expected_shortfall,
+                compute_max_drawdown,
+                compute_beta_exposure,
+                # Advanced risk metrics
+                compute_cornish_fisher_var,
+                compute_evt_var,
+                compute_monte_carlo_var,
+                run_stress_test,
+                compute_tail_dependence,
+            ],
+        )
+    return _agent
+
+
+def __getattr__(name: str):
+    if name == "portfolio_agent":
+        return get_portfolio_agent()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

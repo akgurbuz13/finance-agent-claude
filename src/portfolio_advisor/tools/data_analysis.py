@@ -46,7 +46,6 @@ async def compute_distribution_analysis(
     right_99 = float(np.percentile(returns, 99))
 
     # Compare tails to normal
-    normal_left_5 = mean_r + std_r * (-1.645)
     normal_left_1 = mean_r + std_r * (-2.326)
     tail_ratio_left = abs(left_1 / normal_left_1) if normal_left_1 != 0 else 1.0
 
@@ -212,8 +211,6 @@ async def compute_performance_metrics(
 
     mean_r = float(returns.mean())
     std_r = float(returns.std())
-    rf_daily = 0.05 / 252  # Approximate risk-free rate
-
     # Annualized metrics
     ann_return = mean_r * 252
     ann_vol = std_r * np.sqrt(252)

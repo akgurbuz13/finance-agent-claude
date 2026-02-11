@@ -426,7 +426,7 @@ async def apply_risk_controls(
 ) -> str:
     """Full constraint pass: concentration, drawdown awareness, vol-aware sizing, excluded assets, cash target."""
     proposed = json.loads(proposed_weights_json)  # {ticker: weight_pct}
-    current = json.loads(current_portfolio_json)  # {ticker: weight_pct}
+    json.loads(current_portfolio_json)  # {ticker: weight_pct} — parsed for validation
     risk = json.loads(risk_metrics_json)
     prefs = json.loads(user_prefs_json)
 

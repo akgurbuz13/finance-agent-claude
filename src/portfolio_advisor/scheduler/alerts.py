@@ -1,0 +1,176 @@
+"""News alert pipeline — detects new high-impact research themes and sends Telegram alerts."""
+
+from __future__ import annotations
+
+import json
+import logging
+from datetime import date
+
+from agents import Runner
+
+from portfolio_advisor.agents.context import AppContext
+from portfolio_advisor.agents.research import get_research_agent
+from portfolio_advisor.config import get_settings
+from portfolio_advisor.db import queries
+from portfolio_advisor.db.connection import get_db
+from portfolio_advisor.telegram_bot.bot import send_message
+
+logger = logging.getLogger(__name__)
+
+
+async def run_news_alert_pipeline(ctx: AppContext) -> dict:
+    """Run the research agent and alert on new high-impact themes.
+
+    Steps:
+    1. Call the research agent with the current watchlist.
+    2. Parse returned themes from the agent output.
+    3. Compare against existing themes in the research_themes table.
+    4. If new HIGH impact themes are found, send immediate Telegram alerts.
+    5. Store new themes and deactivate old ones.
+
+    Returns a summary dict with counts of new/existing/alerted themes.
+    """
+    settings = get_settings()
+    today = date.today().isoformat()
+
+    # 1. Run research agent
+    prompt = (
+        f"Research current market-moving news and macro developments for: "
+        f"{', '.join(ctx.watchlist)}\n"
+        f"Date: {today}. Focus on high-impact themes that change the investment thesis."
+    )
+
+    try:
+        result = await Runner.run(
+            starting_agent=get_research_agent(),
+            input=prompt,
+            context=ctx,
+        )
+        raw_output = result.final_output or ""
+    except Exception as e:
+        logger.error(f"Research agent failed in alert pipeline: {e}")
+        return {"error": str(e), "new_themes": 0, "alerts_sent": 0}
+
+    # 2. Parse themes from agent output
+    themes = _parse_themes(raw_output)
+    if not themes:
+        logger.info("News alert pipeline: no themes parsed from research output")
+        return {"new_themes": 0, "alerts_sent": 0, "parse_failed": not raw_output}
+
+    # 3. Get existing themes to detect novelty
+    async with get_db(settings.db_path) as db:
+        existing = await queries.get_active_research_themes(db, days=3)
+        existing_titles = {t["theme"].lower().strip() for t in existing}
+
+        # 4. Identify new themes
+        new_themes = []
+        for theme in themes:
+            title = theme.get("theme", "").lower().strip()
+            if title and title not in existing_titles:
+                new_themes.append(theme)
+
+        # 5. Store new themes
+        for theme in new_themes:
+            theme_data = {
+                "theme_date": today,
+                "theme": theme.get("theme", ""),
+                "summary": theme.get("summary", ""),
+                "impact": theme.get("impact", "medium"),
+                "affected_tickers": theme.get("affected_tickers", []),
+                "sources": theme.get("sources", []),
+                "source_tier": theme.get("source_tier", ""),
+                "is_active": 1,
+            }
+            await queries.store_research_theme(db, theme_data)
+
+        # Deactivate stale themes
+        await queries.deactivate_old_themes(db, days=7)
+
+    # 6. Send alerts for new HIGH impact themes
+    alerts_sent = 0
+    for theme in new_themes:
+        if theme.get("impact", "").lower() == "high":
+            affected = theme.get("affected_tickers", [])
+            tickers_str = ", ".join(affected[:8]) if affected else "broad market"
+            sources = theme.get("sources", [])
+            source_str = f"\nSource: {sources[0]}" if sources else ""
+
+            alert_msg = (
+                f"**Market Alert**\n\n"
+                f"**{theme.get('theme', 'New Development')}**\n"
+                f"{theme.get('summary', '')}\n\n"
+                f"Impact: HIGH | Affected: {tickers_str}"
+                f"{source_str}"
+            )
+            try:
+                await send_message(alert_msg)
+                alerts_sent += 1
+            except Exception as e:
+                logger.warning(f"Failed to send alert: {e}")
+
+    logger.info(
+        f"News alert pipeline: {len(themes)} themes found, "
+        f"{len(new_themes)} new, {alerts_sent} alerts sent"
+    )
+
+    return {
+        "total_themes": len(themes),
+        "new_themes": len(new_themes),
+        "alerts_sent": alerts_sent,
+    }
+
+
+def _parse_themes(raw_output: str) -> list[dict]:
+    """Extract themes list from research agent output.
+
+    The research agent returns JSON with a 'themes' key, but the output
+    may also contain markdown or other text wrapping.
+    """
+    if not raw_output:
+        return []
+
+    # Try direct JSON parse
+    try:
+        data = json.loads(raw_output)
+        if isinstance(data, dict) and "themes" in data:
+            return data["themes"]
+        if isinstance(data, list):
+            return data
+    except json.JSONDecodeError:
+        pass
+
+    # Try to find JSON block in markdown code fences
+    for marker in ("```json", "```"):
+        if marker in raw_output:
+            try:
+                start = raw_output.index(marker) + len(marker)
+                end = raw_output.index("```", start)
+                block = raw_output[start:end].strip()
+                data = json.loads(block)
+                if isinstance(data, dict) and "themes" in data:
+                    return data["themes"]
+                if isinstance(data, list):
+                    return data
+            except (json.JSONDecodeError, ValueError):
+                pass
+
+    # Try to find a JSON object anywhere in the text
+    brace_start = raw_output.find("{")
+    if brace_start >= 0:
+        # Find the matching closing brace by tracking depth
+        depth = 0
+        for i in range(brace_start, len(raw_output)):
+            if raw_output[i] == "{":
+                depth += 1
+            elif raw_output[i] == "}":
+                depth -= 1
+                if depth == 0:
+                    try:
+                        data = json.loads(raw_output[brace_start:i + 1])
+                        if isinstance(data, dict) and "themes" in data:
+                            return data["themes"]
+                    except json.JSONDecodeError:
+                        pass
+                    break
+
+    return []

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import date, timedelta
 
 from telegram import Update
 from telegram.ext import ContextTypes
@@ -37,7 +36,7 @@ def _auth(func):
 
 @_auth
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Welcome message and initialize defaults."""
+    """Welcome message, initialize defaults, and start onboarding if needed."""
     settings = get_settings()
     from portfolio_advisor.db.connection import init_db
     await init_db(settings.db_path)
@@ -48,8 +47,33 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not prefs.get("watchlist"):
             await queries.update_user_preference(db, "watchlist", settings.default_watchlist)
 
+        # Check onboarding state
+        onboarding = await queries.get_onboarding_state(db)
+
+    if settings.onboarding_enabled and (
+        onboarding is None or onboarding.get("current_step") != "done"
+    ):
+        step = onboarding.get("current_step", "welcome") if onboarding else "welcome"
+        if step == "welcome":
+            await update.message.reply_text(
+                "Welcome to Portfolio Advisor!\n\n"
+                "I'm your 24/7 autonomous portfolio advisory system. "
+                "Let me help you set up your investment profile — "
+                "it takes about 2 minutes.\n\n"
+                "Just type anything to begin the guided setup, "
+                "or /help to see all commands.",
+                parse_mode="Markdown",
+            )
+        else:
+            await update.message.reply_text(
+                f"Welcome back! Your setup is in progress (step: {step}).\n\n"
+                "Just type anything to continue where you left off.",
+                parse_mode="Markdown",
+            )
+        return
+
     await update.message.reply_text(
-        "Welcome to Portfolio Advisor!\n\n"
+        "Welcome back to Portfolio Advisor!\n\n"
         "I'm your 24/7 autonomous portfolio advisory system. Here's what I do:\n\n"
         "**Daily** (7:00 UTC): Technical + quant analysis + news monitoring\n"
         "**Weekly** (Sun 18:00 UTC): Full portfolio recommendation report\n\n"
@@ -154,6 +178,12 @@ async def cmd_set(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     valid_keys = {
         "risk_tolerance", "time_horizon", "excluded_assets",
         "allowed_regions", "cash_target_pct", "max_position_pct",
+        # v2 fields
+        "investment_style", "rebalance_frequency",
+        "max_crypto_pct", "min_bond_pct", "max_single_sector_pct",
+        "preferred_sectors", "esg_filter", "dividend_preference",
+        "tax_aware", "notification_level", "analysis_depth",
+        "benchmark", "notes",
     }
     if key not in valid_keys:
         await update.message.reply_text(f"Invalid key. Valid keys: {', '.join(sorted(valid_keys))}")
@@ -162,13 +192,16 @@ async def cmd_set(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     settings = get_settings()
     async with get_db(settings.db_path) as db:
         parsed = value
-        if key in ("cash_target_pct", "max_position_pct"):
+        if key in ("cash_target_pct", "max_position_pct", "max_crypto_pct",
+                    "min_bond_pct", "max_single_sector_pct"):
             parsed = float(value)
-        elif key in ("excluded_assets", "allowed_regions"):
+        elif key in ("excluded_assets", "allowed_regions", "preferred_sectors"):
             try:
                 parsed = json.loads(value)
             except json.JSONDecodeError:
                 parsed = [v.strip() for v in value.split(",")]
+        elif key in ("esg_filter", "tax_aware"):
+            parsed = value.lower() in ("true", "1", "yes", "on")
         await queries.update_user_preference(db, key, parsed)
 
     await update.message.reply_text(f"Updated {key} = {value}")

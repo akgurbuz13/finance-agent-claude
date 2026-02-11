@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-from datetime import date, timedelta
 
 import httpx
 import pandas as pd
@@ -12,7 +11,7 @@ from agents import RunContextWrapper, function_tool
 
 from portfolio_advisor.agents.context import AppContext
 from portfolio_advisor.db.connection import get_db
-from portfolio_advisor.db.queries import cache_prices, get_cached_prices
+from portfolio_advisor.db.queries import cache_prices
 
 CRYPTO_MAP = {
     "BTC": "bitcoin",
@@ -53,13 +52,13 @@ async def _fetch_crypto_ohlcv(coin_id: str, days: int) -> list[dict]:
 
     bars = []
     for candle in data:
-        ts, o, h, l, c = candle
+        ts, o, h, low_val, c = candle
         dt_str = pd.Timestamp(ts, unit="ms").strftime("%Y-%m-%d")
         bars.append({
             "date": dt_str,
             "open": round(o, 4),
             "high": round(h, 4),
-            "low": round(l, 4),
+            "low": round(low_val, 4),
             "close": round(c, 4),
             "volume": 0.0,
         })

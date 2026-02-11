@@ -22,25 +22,95 @@ def get_scheduler() -> AsyncScheduler:
 
 
 async def setup_scheduler() -> AsyncScheduler:
-    """Configure and return the scheduler with daily + weekly jobs."""
-    from portfolio_advisor.scheduler.jobs import daily_job, weekly_job
+    """Configure and return the scheduler with all scheduled jobs.
+
+    Jobs:
+      1. precompute_morning  — 06:00 UTC — full indicator pre-computation
+      2. daily_monitoring    — 06:30 UTC — orchestrator synthesis (uses cached data)
+      3. precompute_midday   — 13:00 UTC — refresh indicators
+      4. midday_update       — 13:30 UTC — delta-focused signal change alerts
+      5. evening_summary     — 20:00 UTC — day scorecard
+      6. weekly_report       — Sun 18:00 UTC — full portfolio report
+      7. forecast_eval       — 22:00 UTC daily — backfill forecast accuracy
+    """
+    from portfolio_advisor.scheduler.jobs import (
+        daily_job,
+        evening_summary_job,
+        forecast_evaluation_job,
+        midday_update_job,
+        precompute_job,
+        weekly_job,
+    )
 
     settings = get_settings()
     scheduler = get_scheduler()
 
-    # Configure tasks
-    scheduler.configure_task("daily_monitoring", func=daily_job, misfire_grace_time=3600)
-    scheduler.configure_task("weekly_report", func=weekly_job, misfire_grace_time=3600)
+    # Configure all tasks
+    scheduler.configure_task(
+        "precompute_morning", func=precompute_job, misfire_grace_time=3600
+    )
+    scheduler.configure_task(
+        "daily_monitoring", func=daily_job, misfire_grace_time=3600
+    )
+    scheduler.configure_task(
+        "precompute_midday", func=precompute_job, misfire_grace_time=3600
+    )
+    scheduler.configure_task(
+        "midday_update", func=midday_update_job, misfire_grace_time=3600
+    )
+    scheduler.configure_task(
+        "evening_summary", func=evening_summary_job, misfire_grace_time=3600
+    )
+    scheduler.configure_task(
+        "weekly_report", func=weekly_job, misfire_grace_time=3600
+    )
+    scheduler.configure_task(
+        "forecast_eval", func=forecast_evaluation_job, misfire_grace_time=3600
+    )
 
-    # Daily schedule
+    # ── Schedules ────────────────────────────────────────────────────────
+
+    # 1. Pre-compute morning (before daily monitoring)
+    await scheduler.add_schedule(
+        task_id="precompute_morning",
+        trigger=CronTrigger(hour=settings.morning_run_hour, minute=0, timezone="UTC"),
+        id="precompute_morning_schedule",
+        conflict_policy="replace",
+    )
+
+    # 2. Daily monitoring (30 min after pre-compute)
     await scheduler.add_schedule(
         task_id="daily_monitoring",
-        trigger=CronTrigger(hour=settings.daily_run_hour, minute=0, timezone="UTC"),
+        trigger=CronTrigger(hour=settings.morning_run_hour, minute=30, timezone="UTC"),
         id="daily_monitoring_schedule",
         conflict_policy="replace",
     )
 
-    # Weekly schedule
+    # 3. Pre-compute midday refresh
+    await scheduler.add_schedule(
+        task_id="precompute_midday",
+        trigger=CronTrigger(hour=settings.midday_run_hour, minute=0, timezone="UTC"),
+        id="precompute_midday_schedule",
+        conflict_policy="replace",
+    )
+
+    # 4. Midday update (delta-focused)
+    await scheduler.add_schedule(
+        task_id="midday_update",
+        trigger=CronTrigger(hour=settings.midday_run_hour, minute=30, timezone="UTC"),
+        id="midday_update_schedule",
+        conflict_policy="replace",
+    )
+
+    # 5. Evening summary
+    await scheduler.add_schedule(
+        task_id="evening_summary",
+        trigger=CronTrigger(hour=settings.evening_run_hour, minute=0, timezone="UTC"),
+        id="evening_summary_schedule",
+        conflict_policy="replace",
+    )
+
+    # 6. Weekly report
     day_map = {"mon": 0, "tue": 1, "wed": 2, "thu": 3, "fri": 4, "sat": 5, "sun": 6}
     day_of_week = day_map.get(settings.weekly_run_day.lower(), 6)
 
@@ -56,9 +126,22 @@ async def setup_scheduler() -> AsyncScheduler:
         conflict_policy="replace",
     )
 
+    # 7. Forecast evaluation (late evening)
+    await scheduler.add_schedule(
+        task_id="forecast_eval",
+        trigger=CronTrigger(hour=22, minute=0, timezone="UTC"),
+        id="forecast_eval_schedule",
+        conflict_policy="replace",
+    )
+
     logger.info(
-        f"Scheduler configured: daily at {settings.daily_run_hour}:00 UTC, "
-        f"weekly on {settings.weekly_run_day} at {settings.weekly_run_hour}:00 UTC"
+        f"Scheduler configured: "
+        f"precompute at {settings.morning_run_hour}:00/{settings.midday_run_hour}:00, "
+        f"daily at {settings.morning_run_hour}:30, "
+        f"midday at {settings.midday_run_hour}:30, "
+        f"evening at {settings.evening_run_hour}:00, "
+        f"weekly on {settings.weekly_run_day} at {settings.weekly_run_hour}:00, "
+        f"forecast eval at 22:00 UTC"
     )
     return scheduler
 

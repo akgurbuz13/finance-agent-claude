@@ -5,11 +5,7 @@ from __future__ import annotations
 from agents import Agent
 
 from portfolio_advisor.agents.context import AppContext
-from portfolio_advisor.agents.portfolio import portfolio_agent
-from portfolio_advisor.agents.quantitative import quantitative_agent
-from portfolio_advisor.agents.reporting import reporting_agent
-from portfolio_advisor.agents.research import research_agent
-from portfolio_advisor.agents.technical import technical_agent
+from portfolio_advisor.config import get_settings
 from portfolio_advisor.tools.db_tools import (
     retrieve_daily_briefs,
     retrieve_weekly_reports,
@@ -58,10 +54,10 @@ Combine all specialist outputs into a single DailyBrief JSON. For each ticker:
 
 1. Merge the technical signal (bias + confidence) with the quant signal (regime + forecast).
 2. Determine the combined signal:
-   - If both agree → combined signal = majority direction, confidence = average + 0.1
-   - If they disagree → combined signal = "neutral", confidence = lower of the two - 0.1
+   - If both agree -> combined signal = majority direction, confidence = average + 0.1
+   - If they disagree -> combined signal = "neutral", confidence = lower of the two - 0.1
 3. Incorporate research context: if news is positive/negative for a ticker, note it in \
-   "why_it_matters" and adjust confidence ±0.05 for strong news.
+   "why_it_matters" and adjust confidence +/-0.05 for strong news.
 4. Write a "what_happened" (factual: what the data shows) and "why_it_matters" \
    (interpretive: what it means for the portfolio).
 
@@ -78,9 +74,7 @@ Create the `telegram_summary` field (max 4000 chars) with this structure:
 **Market Overview**: [2-3 sentences from macro summary]
 
 **Top Signals**:
-• [TICKER] — [SIGNAL] (confidence: [X]) — [1 sentence why]
-• [TICKER] — [SIGNAL] (confidence: [X]) — [1 sentence why]
-• [TICKER] — [SIGNAL] (confidence: [X]) — [1 sentence why]
+[TICKER] — [SIGNAL] (confidence: [X]) — [1 sentence why]
 [Show top 5 by confidence, alternating bullish/bearish for balance]
 
 **Key Themes**: [2-3 themes from research]
@@ -101,8 +95,7 @@ Create the `telegram_summary` field (max 4000 chars) with this structure:
       "signal": "bullish",
       "confidence": 0.72,
       "what_happened": "Factual: SPY up 1.2%, broke above SMA50, RSI 62.",
-      "why_it_matters": "Interpretive: Trend resumption after consolidation. \
-                         Portfolio overweight equity is working.",
+      "why_it_matters": "Interpretive: Trend resumption after consolidation.",
       "technical_json": {},
       "quant_json": {},
       "sources": ["https://..."]
@@ -129,12 +122,10 @@ Create the `telegram_summary` field (max 4000 chars) with this structure:
 
 # Edge Cases
 - **Specialist agent failure**: If one agent fails or returns an error, proceed with \
-  the other two. Note which analysis is missing in the brief. Do NOT fail the entire pipeline.
+  the other two. Note which analysis is missing in the brief.
 - **Empty watchlist**: Use default watchlist: SPY, QQQ, TLT, GLD, BTC.
-- **Weekend/holiday**: If market data is stale (>2 days old), note it in the summary. \
-  Still run research for news context.
-- **Conflicting specialist signals**: This is EXPECTED and valuable. Report the conflict \
-  explicitly — "Technical: bullish, Quant: bearish" — and let the user decide.
+- **Weekend/holiday**: If market data is stale (>2 days old), note it in the summary.
+- **Conflicting specialist signals**: Report the conflict explicitly.
 
 # Constraints
 - Maximum total execution: coordinate all agents efficiently.
@@ -142,30 +133,6 @@ Create the `telegram_summary` field (max 4000 chars) with this structure:
 - Do NOT skip the store_daily_brief step even if the analysis is partial.
 - Round all confidence values to 2 decimal places.
 """
-
-daily_orchestrator = Agent[AppContext](
-    name="Daily Orchestrator",
-    model="gpt-5-mini",
-    instructions=DAILY_ORCHESTRATOR_INSTRUCTIONS,
-    tools=[
-        technical_agent.as_tool(
-            tool_name="run_technical_analysis",
-            tool_description="Run full technical analysis (SMA/EMA, RSI, MACD, Bollinger, S/R, weekly signals) on specified tickers. Pass the tickers as a comma-separated list in a natural language request.",
-        ),
-        quantitative_agent.as_tool(
-            tool_name="run_quantitative_analysis",
-            tool_description="Run quantitative analysis (return/vol forecasts, regime detection, correlations, factor exposures, time series analysis) on specified tickers. Pass the tickers as a comma-separated list.",
-        ),
-        research_agent.as_tool(
-            tool_name="run_market_research",
-            tool_description="Search for latest macro/market news and themes. Pass the watchlist tickers so the agent focuses on relevant news.",
-        ),
-        get_user_preferences,
-        get_current_portfolio,
-        store_daily_brief,
-        store_forecast,
-    ],
-)
 
 # ── Weekly Orchestrator ───────────────────────────────────────────────────────
 
@@ -199,7 +166,6 @@ Call `run_portfolio_construction` with a detailed prompt including:
 - Summary of this week's technical and quant signals
 - Key themes and macro context
 - User's risk tolerance and constraints
-The portfolio agent will return allocation recommendations.
 
 ## Step 4: Dispatch Reporting
 Call `run_reporting` with a detailed prompt including:
@@ -207,41 +173,10 @@ Call `run_reporting` with a detailed prompt including:
 - Portfolio construction agent's output (allocation recommendations)
 - Current portfolio state
 - User preferences
-The reporting agent will produce the full investment committee memo.
 
 ## Step 5: Store and Format
 - Call `store_weekly_report` with the complete WeeklyReport JSON.
 - The report must include a telegram_summary (max 4000 chars).
-
-# WeeklyReport JSON Schema (strict)
-```json
-{
-  "week_ending": "2025-03-15",
-  "executive_summary": "3-4 sentence summary of the week and key recommendation.",
-  "market_review": "Multi-paragraph market review covering all asset classes.",
-  "allocations": [
-    {
-      "ticker": "SPY",
-      "asset_class": "equity",
-      "current_weight_pct": 25.0,
-      "recommended_weight_pct": 22.0,
-      "delta_pct": -3.0,
-      "rationale": "Evidence-based rationale for the change."
-    }
-  ],
-  "risk_assessment": {
-    "overall_risk_level": "moderate",
-    "key_risks": ["Specific risk 1", "Specific risk 2", "Specific risk 3"],
-    "hedging_suggestions": ["Specific suggestion"],
-    "portfolio_var_95": -1.2,
-    "portfolio_es_95": -1.8,
-    "max_drawdown_current": -3.5
-  },
-  "outlook": "1-2 week forward view with scenario analysis.",
-  "action_items": ["Specific, prioritized action 1", "Action 2"],
-  "telegram_summary": "Max 4000 chars, markdown formatted."
-}
-```
 
 # Quality Checks (verify before storing)
 - [ ] executive_summary is 3-4 sentences and mentions a specific recommendation.
@@ -254,36 +189,108 @@ The reporting agent will produce the full investment committee memo.
 
 # Edge Cases
 - **No daily briefs for the week**: Instruct the reporting agent to produce a limited \
-  report based on available data. Flag the data gap prominently.
-- **Portfolio agent fails**: Fall back to "no changes recommended" and explain why the \
-  optimization could not be run.
-- **First ever report**: Instruct the reporting agent to skip week-over-week comparisons \
-  and focus on setting baseline expectations.
+  report based on available data.
+- **Portfolio agent fails**: Fall back to "no changes recommended".
+- **First ever report**: Skip week-over-week comparisons.
 
 # Constraints
 - Do NOT perform analysis yourself. You coordinate and quality-check.
 - Do NOT skip the store_weekly_report step.
 - Ensure the final output passes all quality checks above.
-- This is the most important output of the week — take time to get it right.
 """
 
-weekly_orchestrator = Agent[AppContext](
-    name="Weekly Orchestrator",
-    model="gpt-5.2",
-    instructions=WEEKLY_ORCHESTRATOR_INSTRUCTIONS,
-    tools=[
-        portfolio_agent.as_tool(
-            tool_name="run_portfolio_construction",
-            tool_description="Run portfolio optimization and risk analysis. Provide detailed context about this week's signals, current positions, and user preferences.",
-        ),
-        reporting_agent.as_tool(
-            tool_name="run_reporting",
-            tool_description="Generate the weekly investment committee memo. Provide the week's context, portfolio recommendations, and current state.",
-        ),
-        retrieve_daily_briefs,
-        retrieve_weekly_reports,
-        get_current_portfolio,
-        get_user_preferences,
-        store_weekly_report,
-    ],
-)
+_daily_orchestrator: Agent[AppContext] | None = None
+_weekly_orchestrator: Agent[AppContext] | None = None
+
+
+def get_daily_orchestrator() -> Agent[AppContext]:
+    """Lazy-initialize the daily orchestrator with config-based model."""
+    global _daily_orchestrator
+    if _daily_orchestrator is None:
+        from portfolio_advisor.agents.technical import get_technical_agent
+        from portfolio_advisor.agents.quantitative import get_quantitative_agent
+        from portfolio_advisor.agents.research import get_research_agent
+
+        settings = get_settings()
+        _daily_orchestrator = Agent[AppContext](
+            name="Daily Orchestrator",
+            model=settings.model_orchestrator,
+            instructions=DAILY_ORCHESTRATOR_INSTRUCTIONS,
+            tools=[
+                get_technical_agent().as_tool(
+                    tool_name="run_technical_analysis",
+                    tool_description=(
+                        "Run full technical analysis (SMA/EMA, RSI, MACD, Bollinger, S/R, "
+                        "weekly signals) on specified tickers. Pass the tickers as a "
+                        "comma-separated list in a natural language request."
+                    ),
+                ),
+                get_quantitative_agent().as_tool(
+                    tool_name="run_quantitative_analysis",
+                    tool_description=(
+                        "Run quantitative analysis (return/vol forecasts, regime detection, "
+                        "correlations, factor exposures, time series analysis) on specified "
+                        "tickers. Pass the tickers as a comma-separated list."
+                    ),
+                ),
+                get_research_agent().as_tool(
+                    tool_name="run_market_research",
+                    tool_description=(
+                        "Search for latest macro/market news and themes. Pass the watchlist "
+                        "tickers so the agent focuses on relevant news."
+                    ),
+                ),
+                get_user_preferences,
+                get_current_portfolio,
+                store_daily_brief,
+                store_forecast,
+            ],
+        )
+    return _daily_orchestrator
+
+
+def get_weekly_orchestrator() -> Agent[AppContext]:
+    """Lazy-initialize the weekly orchestrator with config-based model."""
+    global _weekly_orchestrator
+    if _weekly_orchestrator is None:
+        from portfolio_advisor.agents.portfolio import get_portfolio_agent
+        from portfolio_advisor.agents.reporting import get_reporting_agent
+
+        settings = get_settings()
+        _weekly_orchestrator = Agent[AppContext](
+            name="Weekly Orchestrator",
+            model=settings.model_orchestrator,
+            instructions=WEEKLY_ORCHESTRATOR_INSTRUCTIONS,
+            tools=[
+                get_portfolio_agent().as_tool(
+                    tool_name="run_portfolio_construction",
+                    tool_description=(
+                        "Run portfolio optimization and risk analysis. Provide detailed "
+                        "context about this week's signals, current positions, and user "
+                        "preferences."
+                    ),
+                ),
+                get_reporting_agent().as_tool(
+                    tool_name="run_reporting",
+                    tool_description=(
+                        "Generate the weekly investment committee memo. Provide the week's "
+                        "context, portfolio recommendations, and current state."
+                    ),
+                ),
+                retrieve_daily_briefs,
+                retrieve_weekly_reports,
+                get_current_portfolio,
+                get_user_preferences,
+                store_weekly_report,
+            ],
+        )
+    return _weekly_orchestrator
+
+
+# Backward-compatible module-level references
+def __getattr__(name: str):
+    if name == "daily_orchestrator":
+        return get_daily_orchestrator()
+    if name == "weekly_orchestrator":
+        return get_weekly_orchestrator()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

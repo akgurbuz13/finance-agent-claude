@@ -31,14 +31,11 @@ def _interpret_level(value: float, overbought: float, oversold: float) -> str:
     return "neutral"
 
 
-@function_tool
-async def compute_sma_ema_crossovers(
-    ctx: RunContextWrapper[AppContext],
-    ticker: str,
-    prices_json: str,
-) -> str:
-    """Compute SMA(50/200), EMA(12/26), golden/death cross signals."""
-    df = _prices_to_series(prices_json)
+# ── Pure computation functions (no ctx, return dicts) ────────────────────────
+
+
+def compute_sma_ema_raw(df: pd.DataFrame) -> dict:
+    """Compute SMA(50/200), EMA(12/26), golden/death cross — pure function."""
     close = df["close"]
 
     sma50 = close.rolling(50).mean()
@@ -85,34 +82,22 @@ async def compute_sma_ema_crossovers(
     elif cross == "death_cross":
         interpretation = "bearish"
 
-    result = {
-        "ticker": ticker,
-        "indicator": "sma_ema_crossovers",
-        "values": {
-            "price": last_price,
-            "sma50": last_sma50,
-            "sma200": last_sma200,
-            "ema12": last_ema12,
-            "ema26": last_ema26,
-            "cross": cross,
-            "ema_signal": ema_signal,
-        },
+    return {
+        "price": last_price,
+        "sma50": last_sma50,
+        "sma200": last_sma200,
+        "ema12": last_ema12,
+        "ema26": last_ema26,
+        "cross": cross,
+        "ema_signal": ema_signal,
         "trend": trend,
         "interpretation": interpretation,
         "confidence": round(confidence, 2),
     }
-    return json.dumps(result)
 
 
-@function_tool
-async def compute_rsi(
-    ctx: RunContextWrapper[AppContext],
-    ticker: str,
-    prices_json: str,
-    period: int = 14,
-) -> str:
-    """Compute RSI with overbought/oversold interpretation."""
-    df = _prices_to_series(prices_json)
+def compute_rsi_raw(df: pd.DataFrame, period: int = 14) -> dict:
+    """Compute RSI with overbought/oversold interpretation — pure function."""
     delta = df["close"].diff()
 
     gain = delta.where(delta > 0, 0.0)
@@ -138,24 +123,17 @@ async def compute_rsi(
         elif not price_high and rsi_high:
             divergence = "bullish_divergence"
 
-    result = {
-        "ticker": ticker,
-        "indicator": "rsi",
-        "values": {"rsi": round(rsi_val, 2), "period": period, "divergence": divergence},
+    return {
+        "rsi": round(rsi_val, 2),
+        "period": period,
+        "divergence": divergence,
         "interpretation": interpretation,
         "confidence": round(confidence, 2),
     }
-    return json.dumps(result)
 
 
-@function_tool
-async def compute_macd(
-    ctx: RunContextWrapper[AppContext],
-    ticker: str,
-    prices_json: str,
-) -> str:
-    """Compute MACD line, signal, histogram, and crossover detection."""
-    df = _prices_to_series(prices_json)
+def compute_macd_raw(df: pd.DataFrame) -> dict:
+    """Compute MACD line, signal, histogram, and crossover — pure function."""
     close = df["close"]
 
     ema12 = close.ewm(span=12, adjust=False).mean()
@@ -181,30 +159,18 @@ async def compute_macd(
     if crossover != "none":
         confidence = 0.8
 
-    result = {
-        "ticker": ticker,
-        "indicator": "macd",
-        "values": {
-            "macd_line": round(last_macd, 4),
-            "signal_line": round(last_signal, 4),
-            "histogram": round(last_hist, 4),
-            "crossover": crossover,
-        },
+    return {
+        "macd_line": round(last_macd, 4),
+        "signal_line": round(last_signal, 4),
+        "histogram": round(last_hist, 4),
+        "crossover": crossover,
         "interpretation": interpretation,
         "confidence": round(confidence, 2),
     }
-    return json.dumps(result)
 
 
-@function_tool
-async def compute_atr_bollinger(
-    ctx: RunContextWrapper[AppContext],
-    ticker: str,
-    prices_json: str,
-) -> str:
-    """Compute ATR(14) and Bollinger Bands (20,2) with bandwidth and %B."""
-    df = _prices_to_series(prices_json)
-
+def compute_atr_bollinger_raw(df: pd.DataFrame) -> dict:
+    """Compute ATR(14) and Bollinger Bands (20,2) — pure function."""
     # ATR
     high_low = df["high"] - df["low"]
     high_close = (df["high"] - df["close"].shift()).abs()
@@ -225,7 +191,11 @@ async def compute_atr_bollinger(
     last_sma20 = float(sma20.iloc[-1]) if not np.isnan(sma20.iloc[-1]) else last_close
 
     bandwidth = (last_upper - last_lower) / last_sma20 if last_sma20 != 0 else 0
-    pct_b = (last_close - last_lower) / (last_upper - last_lower) if (last_upper - last_lower) != 0 else 0.5
+    pct_b = (
+        (last_close - last_lower) / (last_upper - last_lower)
+        if (last_upper - last_lower) != 0
+        else 0.5
+    )
 
     interpretation = "neutral"
     if pct_b > 1.0:
@@ -235,33 +205,20 @@ async def compute_atr_bollinger(
     elif bandwidth < 0.05:
         interpretation = "neutral"  # Squeeze — expect breakout
 
-    result = {
-        "ticker": ticker,
-        "indicator": "atr_bollinger",
-        "values": {
-            "atr_14": round(last_atr, 4),
-            "bb_upper": round(last_upper, 4),
-            "bb_middle": round(last_sma20, 4),
-            "bb_lower": round(last_lower, 4),
-            "bandwidth": round(bandwidth, 4),
-            "pct_b": round(pct_b, 4),
-        },
+    return {
+        "atr_14": round(last_atr, 4),
+        "bb_upper": round(last_upper, 4),
+        "bb_middle": round(last_sma20, 4),
+        "bb_lower": round(last_lower, 4),
+        "bandwidth": round(bandwidth, 4),
+        "pct_b": round(pct_b, 4),
         "interpretation": interpretation,
         "confidence": round(0.6 if interpretation == "neutral" else 0.7, 2),
     }
-    return json.dumps(result)
 
 
-@function_tool
-async def compute_support_resistance(
-    ctx: RunContextWrapper[AppContext],
-    ticker: str,
-    prices_json: str,
-) -> str:
-    """Compute pivot-based support and resistance levels (S1-S3, R1-R3)."""
-    df = _prices_to_series(prices_json)
-
-    # Use last 20 bars for pivot calculation
+def compute_support_resistance_raw(df: pd.DataFrame) -> dict:
+    """Compute pivot-based support and resistance levels — pure function."""
     recent = df.iloc[-20:]
     high = float(recent["high"].max())
     low = float(recent["low"].min())
@@ -276,8 +233,16 @@ async def compute_support_resistance(
     s3 = low - 2 * (high - pivot)
 
     # Determine proximity
-    nearest_support = max(s for s in [s1, s2, s3] if s < close) if any(s < close for s in [s1, s2, s3]) else s1
-    nearest_resistance = min(r for r in [r1, r2, r3] if r > close) if any(r > close for r in [r1, r2, r3]) else r1
+    nearest_support = (
+        max(s for s in [s1, s2, s3] if s < close)
+        if any(s < close for s in [s1, s2, s3])
+        else s1
+    )
+    nearest_resistance = (
+        min(r for r in [r1, r2, r3] if r > close)
+        if any(r > close for r in [r1, r2, r3])
+        else r1
+    )
 
     dist_to_support_pct = ((close - nearest_support) / close) * 100
     dist_to_resistance_pct = ((nearest_resistance - close) / close) * 100
@@ -288,20 +253,151 @@ async def compute_support_resistance(
     elif dist_to_resistance_pct < 1.0:
         interpretation = "bearish"  # Near resistance
 
+    return {
+        "pivot": round(pivot, 2),
+        "r1": round(r1, 2),
+        "r2": round(r2, 2),
+        "r3": round(r3, 2),
+        "s1": round(s1, 2),
+        "s2": round(s2, 2),
+        "s3": round(s3, 2),
+        "nearest_support": round(nearest_support, 2),
+        "nearest_resistance": round(nearest_resistance, 2),
+        "dist_to_support_pct": round(dist_to_support_pct, 2),
+        "dist_to_resistance_pct": round(dist_to_resistance_pct, 2),
+        "interpretation": interpretation,
+        "confidence": 0.55,
+    }
+
+
+# ── @function_tool wrappers (thin layer over raw functions) ──────────────────
+
+
+@function_tool
+async def compute_sma_ema_crossovers(
+    ctx: RunContextWrapper[AppContext],
+    ticker: str,
+    prices_json: str,
+) -> str:
+    """Compute SMA(50/200), EMA(12/26), golden/death cross signals."""
+    df = _prices_to_series(prices_json)
+    raw = compute_sma_ema_raw(df)
+    result = {
+        "ticker": ticker,
+        "indicator": "sma_ema_crossovers",
+        "values": {
+            "price": raw["price"],
+            "sma50": raw["sma50"],
+            "sma200": raw["sma200"],
+            "ema12": raw["ema12"],
+            "ema26": raw["ema26"],
+            "cross": raw["cross"],
+            "ema_signal": raw["ema_signal"],
+        },
+        "trend": raw["trend"],
+        "interpretation": raw["interpretation"],
+        "confidence": raw["confidence"],
+    }
+    return json.dumps(result)
+
+
+@function_tool
+async def compute_rsi(
+    ctx: RunContextWrapper[AppContext],
+    ticker: str,
+    prices_json: str,
+    period: int = 14,
+) -> str:
+    """Compute RSI with overbought/oversold interpretation."""
+    df = _prices_to_series(prices_json)
+    raw = compute_rsi_raw(df, period)
+    result = {
+        "ticker": ticker,
+        "indicator": "rsi",
+        "values": {"rsi": raw["rsi"], "period": raw["period"], "divergence": raw["divergence"]},
+        "interpretation": raw["interpretation"],
+        "confidence": raw["confidence"],
+    }
+    return json.dumps(result)
+
+
+@function_tool
+async def compute_macd(
+    ctx: RunContextWrapper[AppContext],
+    ticker: str,
+    prices_json: str,
+) -> str:
+    """Compute MACD line, signal, histogram, and crossover detection."""
+    df = _prices_to_series(prices_json)
+    raw = compute_macd_raw(df)
+    result = {
+        "ticker": ticker,
+        "indicator": "macd",
+        "values": {
+            "macd_line": raw["macd_line"],
+            "signal_line": raw["signal_line"],
+            "histogram": raw["histogram"],
+            "crossover": raw["crossover"],
+        },
+        "interpretation": raw["interpretation"],
+        "confidence": raw["confidence"],
+    }
+    return json.dumps(result)
+
+
+@function_tool
+async def compute_atr_bollinger(
+    ctx: RunContextWrapper[AppContext],
+    ticker: str,
+    prices_json: str,
+) -> str:
+    """Compute ATR(14) and Bollinger Bands (20,2) with bandwidth and %B."""
+    df = _prices_to_series(prices_json)
+    raw = compute_atr_bollinger_raw(df)
+    result = {
+        "ticker": ticker,
+        "indicator": "atr_bollinger",
+        "values": {
+            "atr_14": raw["atr_14"],
+            "bb_upper": raw["bb_upper"],
+            "bb_middle": raw["bb_middle"],
+            "bb_lower": raw["bb_lower"],
+            "bandwidth": raw["bandwidth"],
+            "pct_b": raw["pct_b"],
+        },
+        "interpretation": raw["interpretation"],
+        "confidence": raw["confidence"],
+    }
+    return json.dumps(result)
+
+
+@function_tool
+async def compute_support_resistance(
+    ctx: RunContextWrapper[AppContext],
+    ticker: str,
+    prices_json: str,
+) -> str:
+    """Compute pivot-based support and resistance levels (S1-S3, R1-R3)."""
+    df = _prices_to_series(prices_json)
+    raw = compute_support_resistance_raw(df)
     result = {
         "ticker": ticker,
         "indicator": "support_resistance",
         "values": {
-            "pivot": round(pivot, 2),
-            "r1": round(r1, 2), "r2": round(r2, 2), "r3": round(r3, 2),
-            "s1": round(s1, 2), "s2": round(s2, 2), "s3": round(s3, 2),
-            "nearest_support": round(nearest_support, 2),
-            "nearest_resistance": round(nearest_resistance, 2),
-            "dist_to_support_pct": round(dist_to_support_pct, 2),
-            "dist_to_resistance_pct": round(dist_to_resistance_pct, 2),
+            "pivot": raw["pivot"],
+            "r1": raw["r1"],
+            "r2": raw["r2"],
+            "r3": raw["r3"],
+            "s1": raw["s1"],
+            "s2": raw["s2"],
+            "s3": raw["s3"],
+            "nearest_support": raw["nearest_support"],
+            "nearest_resistance": raw["nearest_resistance"],
+            "dist_to_support_pct": raw["dist_to_support_pct"],
+            "dist_to_resistance_pct": raw["dist_to_resistance_pct"],
         },
-        "interpretation": interpretation,
-        "confidence": 0.55,
+        "interpretation": raw["interpretation"],
+        "confidence": raw["confidence"],
     }
     return json.dumps(result)
 
@@ -338,7 +434,6 @@ async def compute_weekly_signals(
 
     # Weekly SMA
     sma20w = close.rolling(20).mean()
-    sma50w = close.rolling(50).mean()
 
     # Weekly RSI
     delta = close.diff()
