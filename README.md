@@ -147,6 +147,19 @@ src/portfolio_advisor/
 
 See [docs/IMPLEMENTATION_PLAN.md](docs/IMPLEMENTATION_PLAN.md) for the full architecture document.
 
+## Architecture Review
+
+**Latest:** 2026-02-11 — Comprehensive 4-agent deep-dive analysis
+
+See [INSIGHTS.md](INSIGHTS.md) for:
+- Tool efficiency analysis (86-tool flat architecture → hierarchical refactor recommendations)
+- Data freshness & historical comparison gaps (intraday snapshot loss)
+- News pipeline responsiveness (6-10 hour blind spots, real-time improvements)
+- Agent dispatch performance (token overhead, tool selection accuracy)
+- Prioritized roadmap with effort estimates and cost savings
+
+**Key Finding:** Refactoring chat agent to hierarchical architecture (like orchestrators) would reduce token overhead by 86% (~$1,620/year savings) while improving tool selection accuracy.
+
 ## License
 
 Private — all rights reserved.

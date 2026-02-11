@@ -10,7 +10,10 @@
       "Bash(do touch \"/Users/alikaangurbuz/finance-agent_claude/tests/$d/__init__.py\")",
       "Bash(chmod:*)",
       "Bash(python3:*)",
-      "Bash(.venv/bin/pip install:*)"
+      "Bash(.venv/bin/pip install:*)",
+      "Bash(/Users/alikaangurbuz/finance-agent_claude/.venv/bin/ruff check:*)",
+      "Bash(PA_OPENAI_API_KEY=test PA_TELEGRAM_BOT_TOKEN=test PA_TELEGRAM_CHAT_ID=123 .venv/bin/python:*)",
+      "Bash(.venv/bin/ruff check:*)"
     ]
   }
 }
