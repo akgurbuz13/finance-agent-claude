@@ -39,41 +39,52 @@ Orchestrators call specialist agents via `.as_tool()` (fan-out/fan-in). The orch
 
 ```
 Pre-compute Pipeline (scheduler, no LLM)
-└── run_precompute_pipeline() — batch technical + quant for watchlist
+└── run_precompute_pipeline() — batch technical + quant + macro + earnings + correlations
 
-Daily Orchestrator (gpt-5.2)
-├── Technical Agent.as_tool() — 14 tools (core + advanced indicators)
-├── Quantitative Agent.as_tool() — 23 tools (core + GARCH/HMM/Kalman/FF3 + time series + analytics)
-└── Research Agent.as_tool() — web search
+Daily Pipeline v3 (token-optimized)
+├── _build_daily_context() — loads pre-computed data from DB (0 tokens)
+├── Research Agent — fresh news via web search (~20K tokens)
+└── Daily Synthesis Agent (gpt-5.2) — combines context + research → DailyBrief
 
 Weekly Orchestrator (gpt-5.2)
 ├── Portfolio Agent.as_tool() — 24 tools (core + CVaR/HRP/Kelly + advanced risk)
 └── Reporting Agent.as_tool()
 
-Chat Agent (gpt-5.2) — 86 tools, cache-first strategy
+Chat Agent (gpt-5.2) — 33 tools (29 direct + 4 agent delegates), cache-first strategy
+├── 10 pre-computed cache tools (instant, 0 LLM cost)
+├── 2 market data + 4 macro + 2 earnings + 3 portfolio + 3 prefs + 3 DB + 1 web + 1 usage
+├── Technical Agent.as_tool() — 14 tools hidden (deep technical analysis)
+├── Quantitative Agent.as_tool() — 23 tools hidden (quant models)
+├── Portfolio Agent.as_tool() — 24 tools hidden (optimization + risk)
+└── Research Agent.as_tool() — web search (structured research)
+
 Onboarding Agent (gpt-5-mini) — 6 tools, guided 5-step new-user setup
 
 News Alert Pipeline (midday + evening jobs)
 └── Research Agent → theme comparison → Telegram alert for HIGH impact
 ```
 
-### Scheduler (7 Jobs)
+### Scheduler (9 Jobs)
 
 | Job | Time (UTC) | Function |
 |-----|-----------|----------|
 | precompute_morning | 06:00 | `precompute_job()` |
 | daily_monitoring | 06:30 | `daily_job()` |
+| news_check_0 | 09:00 | `news_check_job()` |
 | precompute_midday | 13:00 | `precompute_job()` |
 | midday_update | 13:30 | `midday_update_job()` |
+| news_check_1 | 15:00 | `news_check_job()` |
 | evening_summary | 20:00 | `evening_summary_job()` |
 | weekly_report | Sun 18:00 | `weekly_job()` |
 | forecast_eval | 22:00 | `forecast_evaluation_job()` |
 
+News checks at 09:00 and 15:00 are configurable via `PA_NEWS_CHECK_HOURS` (default: `[9, 15]`). Total news coverage: 5x daily (06:30, 09:00, 13:30, 15:00, 20:00) with max ~3.5h gaps.
+
 ### Pre-Compute Pipeline
 
-`tools/precomputed.py` runs 2-3x daily via scheduler. Batch-fetches OHLCV for the entire watchlist, computes all technical indicators (12 indicators including Ichimoku, VWAP, OBV, ADX, Stochastic, Fibonacci) and quant metrics (GARCH vol, HMM state, Kalman beta), stores in `technical_indicators` and `quant_metrics` tables.
+`tools/precomputed.py` runs 2-3x daily via scheduler. Batch-fetches OHLCV for the entire watchlist, computes all technical indicators (12 indicators including Ichimoku, VWAP, OBV, ADX, Stochastic, Fibonacci), quant metrics (GARCH vol, HMM state, Kalman beta, FF3 betas), macro snapshot (VIX, yield curve, credit spread, regime), earnings calendar, correlation matrix, and per-ticker analysis narratives. Results stored with `snapshot_hour` to preserve intraday data across morning/midday/evening runs.
 
-The chat agent checks cache freshness first (`check_data_freshness`) and uses cached data (`get_cached_technical`, `get_cached_quant`, `get_cached_bulk_summary`) before falling through to live computation.
+The chat agent checks cache freshness first (`check_data_freshness`) and uses cached data (10 cache tools) before delegating to specialist agents for live computation.
 
 ### Tool Pattern
 
@@ -98,10 +109,11 @@ All agents typed as `Agent[AppContext]`. Every `@function_tool` receives `ctx: R
 
 ### Database Layer
 
-SQLite via aiosqlite. Three files: `db/schema.py` (DDL), `db/connection.py` (`init_db` + `get_db` context manager), `db/queries.py` (typed CRUD). 18 tables:
+SQLite via aiosqlite. Three files: `db/schema.py` (DDL), `db/connection.py` (`init_db` + `get_db` context manager), `db/queries.py` (typed CRUD). 20 tables:
 
 - **v1**: user_preferences, portfolio_state, portfolio_history, daily_briefs, instrument_briefs, weekly_reports, price_cache, forecasts_log, token_usage
 - **v2**: technical_indicators, quant_metrics, daily_risk_metrics, research_themes, forecast_accuracy, onboarding_state, chat_history, analysis_runs
+- **v3**: earnings_calendar, correlation_snapshot (+ snapshot_hour column on v2 indicator tables, + macro columns on daily_risk_metrics)
 
 ### Runtime Flow
 
@@ -109,11 +121,12 @@ SQLite via aiosqlite. Three files: `db/schema.py` (DDL), `db/connection.py` (`in
 
 ### Key Files
 
-- `agents/chat.py` — Chat agent with 86 tools (the primary user interface)
-- `agents/orchestrator.py` — Daily + Weekly orchestrator definitions
+- `agents/chat.py` — Chat agent with 33 tools (29 direct + 4 agent-as-tool delegates)
+- `agents/orchestrator.py` — Daily + Weekly orchestrators + Daily Synthesis Agent
 - `agents/portfolio.py` — Portfolio agent with 24 tools (core + advanced optimization + risk)
 - `agents/quantitative.py` — Quant agent with 23 tools (core + time series + analytics)
-- `tools/precomputed.py` — Pre-compute pipeline + 5 cache query tools
+- `tools/precomputed.py` — Pre-compute pipeline + 10 cache query tools
+- `tools/earnings.py` — Earnings calendar fetch + query tools
 - `tools/advanced_technical.py` — Ichimoku, VWAP, OBV, ADX, Stochastic, Fibonacci, Volume Profile
 - `tools/advanced_quant.py` — GARCH, HMM, Kalman filter, Fama-French 3-factor
 - `tools/advanced_portfolio.py` — CVaR, HRP, Kelly Criterion, Max Diversification, Entropy, Transaction Costs
@@ -122,10 +135,10 @@ SQLite via aiosqlite. Three files: `db/schema.py` (DDL), `db/connection.py` (`in
 - `tools/advanced_analytics.py` — PCA, Clustering, Style Analysis, Brinson Attribution, Entropy, Mutual Info
 - `tools/economic_data.py` — FRED integration, Yield Curve, Economic Calendar, Macro Regime
 - `agents/onboarding.py` — 5-step guided new-user setup (risk, watchlist, portfolio, preferences)
-- `scheduler/runner.py` — 7 scheduled jobs configuration
+- `scheduler/runner.py` — 9 scheduled jobs configuration (7 original + 2 news checks)
 - `scheduler/jobs.py` — Job implementations (precompute, daily, midday, evening, weekly, forecast eval)
 - `scheduler/alerts.py` — News alert pipeline (research agent → theme detection → Telegram alerts)
-- `telegram_bot/bot.py` — 13 command handlers + free-text chat handler
+- `telegram_bot/bot.py` — 15 command handlers (including /earnings, /news) + free-text chat handler
 - `telegram_bot/chat_handler.py` — Routes to onboarding or chat agent based on onboarding state
 - `config.py` — pydantic-settings with `PA_` prefix, per-agent model assignments
 

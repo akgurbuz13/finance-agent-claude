@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 from datetime import date
+from difflib import SequenceMatcher
 
 from agents import Runner
 
@@ -57,17 +58,23 @@ async def run_news_alert_pipeline(ctx: AppContext) -> dict:
         logger.info("News alert pipeline: no themes parsed from research output")
         return {"new_themes": 0, "alerts_sent": 0, "parse_failed": not raw_output}
 
-    # 3. Get existing themes to detect novelty
+    # 3. Get existing themes to detect novelty (with similarity dedup)
     async with get_db(settings.db_path) as db:
         existing = await queries.get_active_research_themes(db, days=3)
-        existing_titles = {t["theme"].lower().strip() for t in existing}
+        existing_titles = [t["theme"].lower().strip() for t in existing]
 
-        # 4. Identify new themes
+        # 4. Identify genuinely new themes (similarity-based dedup)
         new_themes = []
         for theme in themes:
             title = theme.get("theme", "").lower().strip()
-            if title and title not in existing_titles:
-                new_themes.append(theme)
+            if not title:
+                continue
+            if _is_similar_to_existing(title, existing_titles):
+                continue
+            new_themes.append(theme)
+            # Add to existing_titles so subsequent themes in this batch
+            # are also deduped against each other
+            existing_titles.append(title)
 
         # 5. Store new themes
         for theme in new_themes:
@@ -174,3 +181,41 @@ def _parse_themes(raw_output: str) -> list[dict]:
                     break
 
     return []
+
+
+# ── Theme similarity helpers ─────────────────────────────────────────────────
+
+_SIMILARITY_THRESHOLD = 0.75
+
+
+def _theme_similarity(a: str, b: str) -> float:
+    """Compute similarity between two theme titles.
+
+    Uses SequenceMatcher (stdlib) for fuzzy string matching, plus
+    keyword overlap for additional signal. Returns a score 0.0-1.0.
+    """
+    # Sequence-level similarity
+    seq_ratio = SequenceMatcher(None, a, b).ratio()
+
+    # Keyword overlap (handles reworded but semantically identical themes)
+    words_a = set(a.split())
+    words_b = set(b.split())
+    # Remove very common words that don't carry meaning
+    stopwords = {"the", "a", "an", "and", "or", "of", "in", "on", "to", "for", "is", "are", "at"}
+    words_a -= stopwords
+    words_b -= stopwords
+    if words_a and words_b:
+        overlap = len(words_a & words_b) / min(len(words_a), len(words_b))
+    else:
+        overlap = 0.0
+
+    # Weighted combination: sequence similarity is primary, keyword overlap is secondary
+    return 0.6 * seq_ratio + 0.4 * overlap
+
+
+def _is_similar_to_existing(title: str, existing_titles: list[str]) -> bool:
+    """Check if a theme title is similar enough to any existing theme to be a duplicate."""
+    for existing in existing_titles:
+        if _theme_similarity(title, existing) >= _SIMILARITY_THRESHOLD:
+            return True
+    return False

@@ -20,6 +20,10 @@ that affect the user's watchlist. Focus on information that changes the investme
 not routine noise.
 
 # Procedure
+0. **Earnings check**: If any watchlist companies report earnings within 48 hours (this \
+   context is provided in the input prompt when applicable), include an earnings-focused \
+   search: "[TICKER] earnings Q[X] 20[XX] results analyst expectations guidance". \
+   Prioritize this — earnings are high-impact events.
 1. **Macro search**: Search for "financial markets today macro economy central bank" to \
    get the broad macro picture (Fed/ECB/BOJ policy, GDP, inflation, employment).
 2. **Market search**: Search for "stock market bond market commodity prices today" to \

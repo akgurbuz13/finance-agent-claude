@@ -313,7 +313,7 @@ async def store_technical_indicators(db: aiosqlite.Connection, data: dict) -> No
     """Upsert a row into technical_indicators."""
     await db.execute(
         """INSERT INTO technical_indicators (
-               ticker, indicator_date, run_id,
+               ticker, indicator_date, snapshot_hour, run_id,
                sma50, sma200, ema12, ema26, rsi_14,
                macd_line, macd_signal, macd_histogram,
                atr_14, bb_upper, bb_lower, bb_bandwidth, bb_pct_b,
@@ -323,7 +323,7 @@ async def store_technical_indicators(db: aiosqlite.Connection, data: dict) -> No
                vwap, obv, adx, stochastic_k, stochastic_d,
                fib_levels, overall_bias, overall_confidence, narrative
            ) VALUES (
-               ?, ?, ?,
+               ?, ?, ?, ?,
                ?, ?, ?, ?, ?,
                ?, ?, ?,
                ?, ?, ?, ?, ?,
@@ -333,7 +333,7 @@ async def store_technical_indicators(db: aiosqlite.Connection, data: dict) -> No
                ?, ?, ?, ?, ?,
                ?, ?, ?, ?
            )
-           ON CONFLICT(ticker, indicator_date) DO UPDATE SET
+           ON CONFLICT(ticker, indicator_date, snapshot_hour) DO UPDATE SET
                run_id = excluded.run_id,
                sma50 = excluded.sma50, sma200 = excluded.sma200,
                ema12 = excluded.ema12, ema26 = excluded.ema26,
@@ -357,7 +357,8 @@ async def store_technical_indicators(db: aiosqlite.Connection, data: dict) -> No
                overall_confidence = excluded.overall_confidence,
                narrative = excluded.narrative""",
         (
-            data["ticker"], data["indicator_date"], data.get("run_id"),
+            data["ticker"], data["indicator_date"], data.get("snapshot_hour", 6),
+            data.get("run_id"),
             data.get("sma50"), data.get("sma200"),
             data.get("ema12"), data.get("ema26"), data.get("rsi_14"),
             data.get("macd_line"), data.get("macd_signal"), data.get("macd_histogram"),
@@ -380,17 +381,31 @@ async def store_technical_indicators(db: aiosqlite.Connection, data: dict) -> No
 
 
 async def get_technical_indicators(
-    db: aiosqlite.Connection, ticker: str, date: str | None = None
+    db: aiosqlite.Connection, ticker: str, date: str | None = None,
+    snapshot_hour: int | None = None,
 ) -> dict | None:
-    """Get the latest (or date-specific) technical indicators for a ticker."""
-    if date:
+    """Get the latest (or date-specific) technical indicators for a ticker.
+
+    If snapshot_hour is None, returns the latest snapshot for the given date.
+    """
+    if date and snapshot_hour is not None:
         cursor = await db.execute(
-            "SELECT * FROM technical_indicators WHERE ticker = ? AND indicator_date = ?",
+            """SELECT * FROM technical_indicators
+               WHERE ticker = ? AND indicator_date = ? AND snapshot_hour = ?""",
+            (ticker, date, snapshot_hour),
+        )
+    elif date:
+        cursor = await db.execute(
+            """SELECT * FROM technical_indicators
+               WHERE ticker = ? AND indicator_date = ?
+               ORDER BY snapshot_hour DESC LIMIT 1""",
             (ticker, date),
         )
     else:
         cursor = await db.execute(
-            "SELECT * FROM technical_indicators WHERE ticker = ? ORDER BY indicator_date DESC LIMIT 1",
+            """SELECT * FROM technical_indicators
+               WHERE ticker = ?
+               ORDER BY indicator_date DESC, snapshot_hour DESC LIMIT 1""",
             (ticker,),
         )
     row = await cursor.fetchone()
@@ -423,7 +438,7 @@ async def store_quant_metrics(db: aiosqlite.Connection, data: dict) -> None:
     """Upsert a row into quant_metrics."""
     await db.execute(
         """INSERT INTO quant_metrics (
-               ticker, metric_date, run_id,
+               ticker, metric_date, snapshot_hour, run_id,
                return_1w_pct, return_1w_ci_low, return_1w_ci_high,
                return_1m_pct, return_1m_ci_low, return_1m_ci_high,
                return_3m_pct, return_3m_ci_low, return_3m_ci_high,
@@ -434,7 +449,7 @@ async def store_quant_metrics(db: aiosqlite.Connection, data: dict) -> None:
                garch_vol, hmm_state, kalman_beta, ff3_betas,
                cornish_fisher_var, evt_var
            ) VALUES (
-               ?, ?, ?,
+               ?, ?, ?, ?,
                ?, ?, ?,
                ?, ?, ?,
                ?, ?, ?,
@@ -445,7 +460,7 @@ async def store_quant_metrics(db: aiosqlite.Connection, data: dict) -> None:
                ?, ?, ?, ?,
                ?, ?
            )
-           ON CONFLICT(ticker, metric_date) DO UPDATE SET
+           ON CONFLICT(ticker, metric_date, snapshot_hour) DO UPDATE SET
                run_id = excluded.run_id,
                return_1w_pct = excluded.return_1w_pct,
                return_1w_ci_low = excluded.return_1w_ci_low,
@@ -474,7 +489,8 @@ async def store_quant_metrics(db: aiosqlite.Connection, data: dict) -> None:
                cornish_fisher_var = excluded.cornish_fisher_var,
                evt_var = excluded.evt_var""",
         (
-            data["ticker"], data["metric_date"], data.get("run_id"),
+            data["ticker"], data["metric_date"], data.get("snapshot_hour", 6),
+            data.get("run_id"),
             data.get("return_1w_pct"), data.get("return_1w_ci_low"),
             data.get("return_1w_ci_high"),
             data.get("return_1m_pct"), data.get("return_1m_ci_low"),
@@ -495,17 +511,28 @@ async def store_quant_metrics(db: aiosqlite.Connection, data: dict) -> None:
 
 
 async def get_quant_metrics(
-    db: aiosqlite.Connection, ticker: str, date: str | None = None
+    db: aiosqlite.Connection, ticker: str, date: str | None = None,
+    snapshot_hour: int | None = None,
 ) -> dict | None:
     """Get latest (or date-specific) quant metrics for a ticker."""
-    if date:
+    if date and snapshot_hour is not None:
         cursor = await db.execute(
-            "SELECT * FROM quant_metrics WHERE ticker = ? AND metric_date = ?",
+            """SELECT * FROM quant_metrics
+               WHERE ticker = ? AND metric_date = ? AND snapshot_hour = ?""",
+            (ticker, date, snapshot_hour),
+        )
+    elif date:
+        cursor = await db.execute(
+            """SELECT * FROM quant_metrics
+               WHERE ticker = ? AND metric_date = ?
+               ORDER BY snapshot_hour DESC LIMIT 1""",
             (ticker, date),
         )
     else:
         cursor = await db.execute(
-            "SELECT * FROM quant_metrics WHERE ticker = ? ORDER BY metric_date DESC LIMIT 1",
+            """SELECT * FROM quant_metrics
+               WHERE ticker = ?
+               ORDER BY metric_date DESC, snapshot_hour DESC LIMIT 1""",
             (ticker,),
         )
     row = await cursor.fetchone()
@@ -774,11 +801,14 @@ async def store_daily_risk_metrics(db: aiosqlite.Connection, data: dict) -> None
     """Upsert daily risk metrics for the portfolio."""
     await db.execute(
         """INSERT INTO daily_risk_metrics (
-               risk_date, run_id, var_95, es_95, max_drawdown, current_drawdown,
+               risk_date, snapshot_hour, run_id,
+               var_95, es_95, max_drawdown, current_drawdown,
                portfolio_beta, asset_class_pcts, stress_test_results,
-               diversification_ratio, entropy_score
-           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-           ON CONFLICT(risk_date) DO UPDATE SET
+               diversification_ratio, entropy_score,
+               yield_curve_slope, yield_curve_inverted, vix_level, vix_regime,
+               credit_spread, macro_regime
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT(risk_date, snapshot_hour) DO UPDATE SET
                run_id = excluded.run_id,
                var_95 = excluded.var_95, es_95 = excluded.es_95,
                max_drawdown = excluded.max_drawdown,
@@ -787,15 +817,24 @@ async def store_daily_risk_metrics(db: aiosqlite.Connection, data: dict) -> None
                asset_class_pcts = excluded.asset_class_pcts,
                stress_test_results = excluded.stress_test_results,
                diversification_ratio = excluded.diversification_ratio,
-               entropy_score = excluded.entropy_score""",
+               entropy_score = excluded.entropy_score,
+               yield_curve_slope = excluded.yield_curve_slope,
+               yield_curve_inverted = excluded.yield_curve_inverted,
+               vix_level = excluded.vix_level,
+               vix_regime = excluded.vix_regime,
+               credit_spread = excluded.credit_spread,
+               macro_regime = excluded.macro_regime""",
         (
-            data["risk_date"], data.get("run_id"),
+            data["risk_date"], data.get("snapshot_hour", 6), data.get("run_id"),
             data.get("var_95"), data.get("es_95"),
             data.get("max_drawdown"), data.get("current_drawdown"),
             data.get("portfolio_beta"),
             json.dumps(data["asset_class_pcts"]) if data.get("asset_class_pcts") else None,
             json.dumps(data["stress_test_results"]) if data.get("stress_test_results") else None,
             data.get("diversification_ratio"), data.get("entropy_score"),
+            data.get("yield_curve_slope"), data.get("yield_curve_inverted"),
+            data.get("vix_level"), data.get("vix_regime"),
+            data.get("credit_spread"), data.get("macro_regime"),
         ),
     )
     await db.commit()
@@ -823,6 +862,183 @@ async def get_risk_metrics_history(
                     pass
         results.append(d)
     return results
+
+
+async def get_latest_risk_metrics(db: aiosqlite.Connection) -> dict | None:
+    """Get the most recent daily risk metrics (including macro snapshot)."""
+    cursor = await db.execute(
+        "SELECT * FROM daily_risk_metrics ORDER BY risk_date DESC, snapshot_hour DESC LIMIT 1"
+    )
+    row = await cursor.fetchone()
+    if row is None:
+        return None
+    d = dict(row)
+    for key in ("asset_class_pcts", "stress_test_results"):
+        if isinstance(d.get(key), str):
+            try:
+                d[key] = json.loads(d[key])
+            except json.JSONDecodeError:
+                pass
+    return d
+
+
+# ── Intraday Comparison ──────────────────────────────────────────────────────
+
+async def get_intraday_snapshots(
+    db: aiosqlite.Connection, ticker: str, date: str,
+) -> list[dict]:
+    """Get all snapshot_hour entries for a ticker on a given date."""
+    cursor = await db.execute(
+        """SELECT snapshot_hour, overall_bias, overall_confidence, rsi_14,
+                  macd_histogram, adx, stochastic_k, bb_pct_b, vwap
+           FROM technical_indicators
+           WHERE ticker = ? AND indicator_date = ?
+           ORDER BY snapshot_hour ASC""",
+        (ticker, date),
+    )
+    return [dict(r) for r in await cursor.fetchall()]
+
+
+async def get_indicator_history(
+    db: aiosqlite.Connection, ticker: str, indicator_name: str, days: int = 14,
+) -> list[dict]:
+    """Get a specific indicator's values over the last N days.
+
+    indicator_name must be a valid column in technical_indicators.
+    """
+    valid_cols = {
+        "rsi_14", "macd_line", "macd_histogram", "adx", "stochastic_k",
+        "stochastic_d", "bb_pct_b", "bb_bandwidth", "atr_14", "obv", "vwap",
+        "overall_bias", "overall_confidence", "sma50", "sma200",
+    }
+    if indicator_name not in valid_cols:
+        return []
+    cursor = await db.execute(
+        f"""SELECT indicator_date, snapshot_hour, {indicator_name}
+            FROM technical_indicators
+            WHERE ticker = ? AND indicator_date >= date('now', ?)
+            ORDER BY indicator_date ASC, snapshot_hour ASC""",
+        (ticker, f"-{days} days"),
+    )
+    return [dict(r) for r in await cursor.fetchall()]
+
+
+# ── Earnings Calendar ────────────────────────────────────────────────────────
+
+async def upsert_earnings_entry(db: aiosqlite.Connection, data: dict) -> None:
+    """Insert or update an earnings calendar entry."""
+    await db.execute(
+        """INSERT INTO earnings_calendar (
+               ticker, earnings_date, earnings_time,
+               eps_estimate, revenue_estimate,
+               eps_actual, revenue_actual,
+               eps_surprise_pct, revenue_surprise_pct,
+               status, source, updated_at
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+           ON CONFLICT(ticker, earnings_date) DO UPDATE SET
+               earnings_time = COALESCE(excluded.earnings_time, earnings_calendar.earnings_time),
+               eps_estimate = COALESCE(excluded.eps_estimate, earnings_calendar.eps_estimate),
+               revenue_estimate = COALESCE(excluded.revenue_estimate, earnings_calendar.revenue_estimate),
+               eps_actual = COALESCE(excluded.eps_actual, earnings_calendar.eps_actual),
+               revenue_actual = COALESCE(excluded.revenue_actual, earnings_calendar.revenue_actual),
+               eps_surprise_pct = COALESCE(excluded.eps_surprise_pct, earnings_calendar.eps_surprise_pct),
+               revenue_surprise_pct = COALESCE(excluded.revenue_surprise_pct, earnings_calendar.revenue_surprise_pct),
+               status = excluded.status,
+               updated_at = datetime('now')""",
+        (
+            data["ticker"], data["earnings_date"], data.get("earnings_time"),
+            data.get("eps_estimate"), data.get("revenue_estimate"),
+            data.get("eps_actual"), data.get("revenue_actual"),
+            data.get("eps_surprise_pct"), data.get("revenue_surprise_pct"),
+            data.get("status", "upcoming"), data.get("source", "yfinance"),
+        ),
+    )
+    await db.commit()
+
+
+async def get_upcoming_earnings(
+    db: aiosqlite.Connection, days: int = 14,
+) -> list[dict]:
+    """Get earnings in the next N days for all tracked tickers."""
+    cursor = await db.execute(
+        """SELECT * FROM earnings_calendar
+           WHERE earnings_date BETWEEN date('now') AND date('now', ?)
+             AND status = 'upcoming'
+           ORDER BY earnings_date ASC""",
+        (f"+{days} days",),
+    )
+    return [dict(r) for r in await cursor.fetchall()]
+
+
+async def get_recent_earnings(
+    db: aiosqlite.Connection, days: int = 7,
+) -> list[dict]:
+    """Get recently reported earnings."""
+    cursor = await db.execute(
+        """SELECT * FROM earnings_calendar
+           WHERE earnings_date >= date('now', ?)
+             AND status = 'reported'
+           ORDER BY earnings_date DESC""",
+        (f"-{days} days",),
+    )
+    return [dict(r) for r in await cursor.fetchall()]
+
+
+async def get_earnings_for_ticker(
+    db: aiosqlite.Connection, ticker: str,
+) -> list[dict]:
+    """Get all earnings entries for a specific ticker."""
+    cursor = await db.execute(
+        """SELECT * FROM earnings_calendar
+           WHERE ticker = ?
+           ORDER BY earnings_date DESC""",
+        (ticker,),
+    )
+    return [dict(r) for r in await cursor.fetchall()]
+
+
+# ── Correlation Snapshot ─────────────────────────────────────────────────────
+
+async def store_correlation_snapshot(db: aiosqlite.Connection, data: dict) -> None:
+    """Upsert a correlation snapshot."""
+    await db.execute(
+        """INSERT INTO correlation_snapshot (
+               snapshot_date, run_id, correlation_matrix,
+               top_correlations, diversification_score, cluster_assignments
+           ) VALUES (?, ?, ?, ?, ?, ?)
+           ON CONFLICT(snapshot_date) DO UPDATE SET
+               run_id = excluded.run_id,
+               correlation_matrix = excluded.correlation_matrix,
+               top_correlations = excluded.top_correlations,
+               diversification_score = excluded.diversification_score,
+               cluster_assignments = excluded.cluster_assignments""",
+        (
+            data["snapshot_date"], data.get("run_id"),
+            json.dumps(data["correlation_matrix"]),
+            json.dumps(data.get("top_correlations", [])),
+            data.get("diversification_score"),
+            json.dumps(data.get("cluster_assignments", {})),
+        ),
+    )
+    await db.commit()
+
+
+async def get_latest_correlation_snapshot(db: aiosqlite.Connection) -> dict | None:
+    """Get the most recent correlation snapshot."""
+    cursor = await db.execute(
+        "SELECT * FROM correlation_snapshot ORDER BY snapshot_date DESC LIMIT 1"
+    )
+    row = await cursor.fetchone()
+    if row is None:
+        return None
+    d = dict(row)
+    for key in ("correlation_matrix", "top_correlations", "cluster_assignments"):
+        if isinstance(d.get(key), str):
+            try:
+                d[key] = json.loads(d[key])
+            except json.JSONDecodeError:
+                pass
+    return d
 
 
 # ── Onboarding State ─────────────────────────────────────────────────────────

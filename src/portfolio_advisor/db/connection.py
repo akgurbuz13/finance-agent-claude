@@ -50,10 +50,47 @@ async def _migrate_preferences(db: aiosqlite.Connection) -> None:
     await db.commit()
 
 
+async def _migrate_v3_snapshot_hour(db: aiosqlite.Connection) -> None:
+    """Add snapshot_hour column and recreate UNIQUE constraints for v3.
+
+    SQLite can't ALTER UNIQUE constraints, so we recreate affected tables
+    when the snapshot_hour column is missing. Pre-computed data is ephemeral
+    and will be repopulated on the next pipeline run.
+    """
+    tables_to_migrate = [
+        (
+            "technical_indicators",
+            "snapshot_hour",
+        ),
+        (
+            "quant_metrics",
+            "snapshot_hour",
+        ),
+        (
+            "daily_risk_metrics",
+            "snapshot_hour",
+        ),
+    ]
+    for table, col in tables_to_migrate:
+        existing = await _get_table_columns(db, table)
+        if col not in existing:
+            # Drop and let SCHEMA_SQL recreate with new constraint
+            await db.execute(f"DROP TABLE IF EXISTS {table}")
+            logger.info(f"Migrated {table}: recreated with {col} column")
+
+    await db.commit()
+
+
 async def init_db(db_path: str) -> None:
     """Create tables if they don't exist and seed defaults."""
     os.makedirs(os.path.dirname(db_path) or ".", exist_ok=True)
     async with aiosqlite.connect(db_path) as db:
+        # v3 migration must run BEFORE schema creation so tables are recreated
+        try:
+            await _migrate_v3_snapshot_hour(db)
+        except Exception:
+            pass  # Tables may not exist yet on fresh install
+
         await db.executescript(SCHEMA_SQL)
 
         # Seed default user_preferences row if missing

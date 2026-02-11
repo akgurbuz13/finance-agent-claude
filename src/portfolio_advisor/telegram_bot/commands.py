@@ -102,6 +102,8 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/confirm \\<ticker\\> \\<weight\\> \\- Confirm trade\n"
         "/brief \\- Latest daily brief\n"
         "/report \\- Latest weekly report\n"
+        "/earnings \\- Upcoming & recent earnings\n"
+        "/news \\- On\\-demand news research\n"
         "/usage \\- Token usage & cost\n"
         "/rundaily \\- Force daily run\n"
         "/runweekly \\- Force weekly run\n"
@@ -379,6 +381,80 @@ async def cmd_runweekly(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     except Exception as e:
         logger.exception(f"Manual weekly run failed: {e}")
         await update.message.reply_text(f"Weekly run failed: {str(e)[:300]}")
+
+
+@_auth
+async def cmd_news(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Trigger on-demand news research for the watchlist."""
+    await update.message.reply_text("Searching for latest news... This may take a minute.")
+
+    try:
+        from portfolio_advisor.scheduler.alerts import run_news_alert_pipeline
+        from portfolio_advisor.scheduler.jobs import _build_context
+
+        ctx = await _build_context()
+        result = await run_news_alert_pipeline(ctx)
+
+        new_count = result.get("new_themes", 0)
+        total = result.get("total_themes", 0)
+        alerts = result.get("alerts_sent", 0)
+
+        summary_parts = [f"Found {total} themes ({new_count} new)"]
+        if alerts:
+            summary_parts.append(f"{alerts} high-impact alerts sent")
+        if result.get("error"):
+            summary_parts.append(f"Error: {result['error'][:200]}")
+
+        await update.message.reply_text(
+            f"**News Research Complete**\n\n{'. '.join(summary_parts)}.",
+            parse_mode="Markdown",
+        )
+    except Exception as e:
+        logger.exception(f"On-demand news check failed: {e}")
+        await update.message.reply_text(f"News check failed: {str(e)[:300]}")
+
+
+@_auth
+async def cmd_earnings(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Show upcoming and recent earnings for watchlist tickers."""
+    settings = get_settings()
+    async with get_db(settings.db_path) as db:
+        upcoming = await queries.get_upcoming_earnings(db, days=14)
+        recent = await queries.get_recent_earnings(db, days=7)
+
+    lines: list[str] = []
+
+    if upcoming:
+        lines.append("**Upcoming Earnings (next 14 days)**\n")
+        for e in upcoming:
+            time_str = f" ({e['earnings_time']})" if e.get("earnings_time", "unknown") != "unknown" else ""
+            eps_str = f" — Est EPS: ${e['eps_estimate']:.2f}" if e.get("eps_estimate") else ""
+            rev_str = ""
+            if e.get("revenue_estimate") and e["revenue_estimate"] > 1e6:
+                rev_str = f", Est Rev: ${e['revenue_estimate'] / 1e9:.1f}B"
+            lines.append(f"  {e['ticker']}: {e['earnings_date']}{time_str}{eps_str}{rev_str}")
+    else:
+        lines.append("No upcoming earnings in the next 14 days.")
+
+    if recent:
+        lines.append("\n**Recent Reports (last 7 days)**\n")
+        for e in recent:
+            surprise = e.get("eps_surprise_pct", 0)
+            if surprise > 0:
+                verdict = f"beat by {surprise:.1f}%"
+            elif surprise < 0:
+                verdict = f"miss by {abs(surprise):.1f}%"
+            else:
+                verdict = "in-line"
+            actual_str = f"${e['eps_actual']:.2f}" if e.get("eps_actual") is not None else "?"
+            est_str = f"${e['eps_estimate']:.2f}" if e.get("eps_estimate") is not None else "?"
+            lines.append(f"  {e['ticker']}: EPS {actual_str} vs {est_str} est ({verdict})")
+
+    text = "\n".join(lines) if lines else "No earnings data available yet."
+    try:
+        await update.message.reply_text(text, parse_mode="Markdown")
+    except Exception:
+        await update.message.reply_text(text)
 
 
 def _classify(ticker: str) -> str:

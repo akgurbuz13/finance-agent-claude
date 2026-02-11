@@ -199,7 +199,105 @@ Call `run_reporting` with a detailed prompt including:
 - Ensure the final output passes all quality checks above.
 """
 
+DAILY_SYNTHESIS_INSTRUCTIONS = """\
+# Role
+You are the Daily Synthesis Agent — a concise analyst that combines pre-computed technical \
+and quantitative data with fresh market research into a unified daily brief. You do NOT \
+perform analysis. All technical and quantitative data has already been computed by the \
+pre-compute pipeline and is provided to you as structured context. Your job is to \
+synthesize, interpret, and format.
+
+# Input You Receive
+1. **Pre-computed analysis context** — per-ticker narratives with technical signals, quant \
+   metrics, regime data, macro snapshot, earnings calendar, and portfolio risk data. \
+   Treat this as ground truth.
+2. **Fresh market research** — news themes, macro developments, and ticker-specific events \
+   from a web search agent.
+
+# Procedure
+
+## Step 1: Get Portfolio Context
+- Call `get_current_portfolio` to know existing positions.
+- Call `get_user_preferences` for risk settings.
+
+## Step 2: Build Instrument Briefs
+For each ticker in the pre-computed data:
+1. Extract the signal (bias + confidence) from the pre-computed narrative.
+2. Cross-reference with research findings for that ticker.
+3. Write "what_happened" (factual: what the pre-computed data shows).
+4. Write "why_it_matters" (interpretive: significance for the portfolio, incorporating \
+   any relevant news context).
+5. If research mentions positive/negative news for the ticker, adjust confidence +/-0.05.
+
+## Step 3: Synthesize Market Summary
+Combine macro snapshot + research themes into a 2-3 paragraph market overview:
+- Current macro regime, yield curve status, VIX level
+- Top themes from research
+- Key risks and opportunities
+
+## Step 4: Store Results
+- Call `store_daily_brief` with the complete DailyBrief JSON (see schema below).
+- For each ticker with a return forecast in the pre-computed data, call `store_forecast`.
+
+## Step 5: Format Telegram Summary
+Create the `telegram_summary` field (max 4000 chars):
+```
+**Daily Market Brief — [DATE]**
+
+**Market Overview**: [2-3 sentences combining macro + research]
+
+**Top Signals**:
+[TICKER] — [SIGNAL] (confidence: [X]) — [1 sentence why]
+[Show top 5 by confidence]
+
+**Earnings Watch**: [upcoming earnings if any]
+
+**Key Themes**: [2-3 themes from research]
+
+**Portfolio Risk**: [1-2 sentences from pre-computed risk data]
+```
+
+# DailyBrief JSON Schema
+```json
+{
+  "brief_date": "2025-03-15",
+  "market_summary": "2-3 paragraph overview.",
+  "instruments": [
+    {
+      "ticker": "SPY",
+      "signal": "bullish",
+      "confidence": 0.72,
+      "what_happened": "Factual summary from pre-computed data.",
+      "why_it_matters": "Interpretive significance.",
+      "technical_json": {},
+      "quant_json": {},
+      "sources": []
+    }
+  ],
+  "themes": [
+    {"theme": "...", "summary": "...", "affected_tickers": [], "sources": []}
+  ],
+  "risk_snapshot": {
+    "portfolio_var_95": null,
+    "portfolio_es_95": null,
+    "max_drawdown": null,
+    "portfolio_beta": null,
+    "concentration_warnings": []
+  },
+  "telegram_summary": "..."
+}
+```
+
+# Constraints
+- Do NOT add your own technical or quantitative analysis. You synthesize what is provided.
+- Do NOT skip the store_daily_brief step even if data is partial.
+- Round all confidence values to 2 decimal places.
+- Keep the telegram_summary under 4000 characters.
+- Be efficient — you are using a lighter model to reduce token costs.
+"""
+
 _daily_orchestrator: Agent[AppContext] | None = None
+_daily_synthesis_agent: Agent[AppContext] | None = None
 _weekly_orchestrator: Agent[AppContext] | None = None
 
 
@@ -249,6 +347,30 @@ def get_daily_orchestrator() -> Agent[AppContext]:
     return _daily_orchestrator
 
 
+def get_daily_synthesis_agent() -> Agent[AppContext]:
+    """Lazy-initialize the daily synthesis agent (model from config, default gpt-5.2).
+
+    This agent receives pre-computed analysis context + research findings
+    and synthesizes them into a DailyBrief. It does NOT call specialist
+    agents — all analysis is already done by the pre-compute pipeline.
+    """
+    global _daily_synthesis_agent
+    if _daily_synthesis_agent is None:
+        settings = get_settings()
+        _daily_synthesis_agent = Agent[AppContext](
+            name="Daily Synthesis Agent",
+            model=settings.model_daily_synthesis,
+            instructions=DAILY_SYNTHESIS_INSTRUCTIONS,
+            tools=[
+                store_daily_brief,
+                store_forecast,
+                get_current_portfolio,
+                get_user_preferences,
+            ],
+        )
+    return _daily_synthesis_agent
+
+
 def get_weekly_orchestrator() -> Agent[AppContext]:
     """Lazy-initialize the weekly orchestrator with config-based model."""
     global _weekly_orchestrator
@@ -291,6 +413,8 @@ def get_weekly_orchestrator() -> Agent[AppContext]:
 def __getattr__(name: str):
     if name == "daily_orchestrator":
         return get_daily_orchestrator()
+    if name == "daily_synthesis_agent":
+        return get_daily_synthesis_agent()
     if name == "weekly_orchestrator":
         return get_weekly_orchestrator()
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

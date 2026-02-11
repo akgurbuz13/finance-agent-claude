@@ -27,17 +27,20 @@ async def setup_scheduler() -> AsyncScheduler:
     Jobs:
       1. precompute_morning  — 06:00 UTC — full indicator pre-computation
       2. daily_monitoring    — 06:30 UTC — orchestrator synthesis (uses cached data)
-      3. precompute_midday   — 13:00 UTC — refresh indicators
-      4. midday_update       — 13:30 UTC — delta-focused signal change alerts
-      5. evening_summary     — 20:00 UTC — day scorecard
-      6. weekly_report       — Sun 18:00 UTC — full portfolio report
-      7. forecast_eval       — 22:00 UTC daily — backfill forecast accuracy
+      3. news_check_morning  — 09:00 UTC — lightweight news alert check
+      4. precompute_midday   — 13:00 UTC — refresh indicators
+      5. midday_update       — 13:30 UTC — delta-focused signal change alerts
+      6. news_check_afternoon — 15:00 UTC — lightweight news alert check
+      7. evening_summary     — 20:00 UTC — day scorecard
+      8. weekly_report       — Sun 18:00 UTC — full portfolio report
+      9. forecast_eval       — 22:00 UTC daily — backfill forecast accuracy
     """
     from portfolio_advisor.scheduler.jobs import (
         daily_job,
         evening_summary_job,
         forecast_evaluation_job,
         midday_update_job,
+        news_check_job,
         precompute_job,
         weekly_job,
     )
@@ -67,6 +70,12 @@ async def setup_scheduler() -> AsyncScheduler:
     scheduler.configure_task(
         "forecast_eval", func=forecast_evaluation_job, misfire_grace_time=3600
     )
+
+    # News check tasks (one per configured hour)
+    for i, hour in enumerate(settings.news_check_hours):
+        scheduler.configure_task(
+            f"news_check_{i}", func=news_check_job, misfire_grace_time=3600
+        )
 
     # ── Schedules ────────────────────────────────────────────────────────
 
@@ -134,11 +143,22 @@ async def setup_scheduler() -> AsyncScheduler:
         conflict_policy="replace",
     )
 
+    # 8+. Additional news check jobs (configurable hours, default 09:00 and 15:00)
+    for i, hour in enumerate(settings.news_check_hours):
+        await scheduler.add_schedule(
+            task_id=f"news_check_{i}",
+            trigger=CronTrigger(hour=hour, minute=0, timezone="UTC"),
+            id=f"news_check_{i}_schedule",
+            conflict_policy="replace",
+        )
+
+    news_hours_str = ", ".join(f"{h}:00" for h in settings.news_check_hours)
     logger.info(
         f"Scheduler configured: "
         f"precompute at {settings.morning_run_hour}:00/{settings.midday_run_hour}:00, "
         f"daily at {settings.morning_run_hour}:30, "
         f"midday at {settings.midday_run_hour}:30, "
+        f"news checks at {news_hours_str}, "
         f"evening at {settings.evening_run_hour}:00, "
         f"weekly on {settings.weekly_run_day} at {settings.weekly_run_hour}:00, "
         f"forecast eval at 22:00 UTC"

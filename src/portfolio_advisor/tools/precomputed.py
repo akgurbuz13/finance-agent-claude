@@ -32,6 +32,7 @@ from portfolio_advisor.tools.quant_models import (
     detect_regime_raw,
 )
 from portfolio_advisor.tools.advanced_quant import (
+    compute_fama_french_raw,
     compute_garch_raw,
     compute_kalman_beta_raw,
     detect_regime_hmm_raw,
@@ -55,6 +56,17 @@ from portfolio_advisor.tools.technical_indicators import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _get_snapshot_hour() -> int:
+    """Determine snapshot_hour from current UTC hour."""
+    hour = datetime.utcnow().hour
+    if hour < 10:
+        return 6
+    elif hour < 17:
+        return 13
+    else:
+        return 20
 
 
 # ── Helper: build DataFrame from yfinance multi-ticker download ──────────────
@@ -89,49 +101,84 @@ def _extract_ticker_df(
         return None
 
 
-def _synthesize_bias(tech_signals: list[dict]) -> tuple[str, float, str]:
+def _synthesize_bias(
+    tech_signals: list[dict], regime: str | None = None,
+) -> tuple[str, float, str]:
     """Synthesize an overall bias from multiple indicator signals.
+
+    If regime is provided, weight indicators accordingly:
+    - "trending": weight trend indicators higher (sma_ema, adx_dmi, ichimoku)
+    - "mean_reverting": weight oscillators higher (rsi, stochastic, atr_bollinger)
+    - "volatile": weight volatility indicators higher (atr_bollinger, vwap, volume_profile)
 
     Returns (bias, confidence, narrative).
     """
-    bullish = 0
-    bearish = 0
-    total_conf = 0.0
+    # Regime-conditioned weight multipliers
+    trend_indicators = {"sma_ema", "adx_dmi", "ichimoku", "macd"}
+    oscillator_indicators = {"rsi", "stochastic", "atr_bollinger", "fibonacci"}
+    vol_indicators = {"atr_bollinger", "vwap", "volume_profile"}
+
+    bullish_w = 0.0
+    bearish_w = 0.0
+    total_w = 0.0
+
+    divergences = []
+    parts = []
 
     for sig in tech_signals:
         interp = sig.get("interpretation", "neutral")
         conf = sig.get("confidence", 0.5)
-        total_conf += conf
+        name = sig.get("_indicator", "indicator")
+
+        # Determine weight based on regime
+        weight = 1.0
+        if regime == "trending" and name in trend_indicators:
+            weight = 1.5
+        elif regime == "mean_reverting" and name in oscillator_indicators:
+            weight = 1.5
+        elif regime == "volatile" and name in vol_indicators:
+            weight = 1.5
+
+        weighted_conf = conf * weight
+        total_w += weighted_conf
+
         if interp == "bullish":
-            bullish += 1
+            bullish_w += weighted_conf
         elif interp == "bearish":
-            bearish += 1
+            bearish_w += weighted_conf
+
+        parts.append(f"{name}={interp}")
+
+        # Track divergences
+        if sig.get("divergence"):
+            divergences.append(f"{name}: {sig['divergence']}")
 
     n = len(tech_signals)
-    avg_conf = round(total_conf / n, 2) if n > 0 else 0.5
+    avg_conf = round(total_w / (n * 1.0), 2) if n > 0 else 0.5
+    total_directional = bullish_w + bearish_w
+    bullish_ratio = bullish_w / total_directional if total_directional > 0 else 0.5
 
-    if bullish > bearish and bullish >= n * 0.6:
+    if bullish_ratio >= 0.7:
         bias = "bullish"
         confidence = min(0.95, avg_conf + 0.05)
-    elif bearish > bullish and bearish >= n * 0.6:
+    elif bullish_ratio <= 0.3:
         bias = "bearish"
         confidence = min(0.95, avg_conf + 0.05)
-    elif bullish > bearish:
+    elif bullish_ratio >= 0.55:
         bias = "slightly_bullish"
         confidence = avg_conf
-    elif bearish > bullish:
+    elif bullish_ratio <= 0.45:
         bias = "slightly_bearish"
         confidence = avg_conf
     else:
         bias = "neutral"
         confidence = max(0.4, avg_conf - 0.1)
 
-    parts = []
-    for sig in tech_signals:
-        name = sig.get("_indicator", "indicator")
-        interp = sig.get("interpretation", "neutral")
-        parts.append(f"{name}={interp}")
     narrative = f"Signals: {', '.join(parts)}. Overall: {bias} (conf={confidence:.2f})."
+    if regime:
+        narrative += f" Regime: {regime}."
+    if divergences:
+        narrative += f" Divergences: {'; '.join(divergences)}."
 
     return bias, round(confidence, 2), narrative
 
@@ -172,8 +219,8 @@ async def run_precompute_pipeline(ctx: AppContext) -> dict:
     equity_tickers = [t for t in watchlist if t.upper() not in CRYPTO_MAP]
     crypto_tickers = [t for t in watchlist if t.upper() in CRYPTO_MAP]
 
-    # Always include SPY for factor exposure calculations
-    all_equity = list(set(equity_tickers + ["SPY"]))
+    # Always include SPY + factor proxy ETFs for FF3 and factor exposure calculations
+    all_equity = list(set(equity_tickers + ["SPY", "IWM", "IWD", "IWF"]))
 
     ticker_dfs: dict[str, pd.DataFrame] = {}
 
@@ -222,6 +269,27 @@ async def run_precompute_pipeline(ctx: AppContext) -> dict:
     if spy_df is not None:
         spy_returns = spy_df["close"].pct_change().dropna()
 
+    # FF3 factor proxy returns
+    iwm_df = ticker_dfs.get("IWM")
+    iwd_df = ticker_dfs.get("IWD")
+    iwf_df = ticker_dfs.get("IWF")
+    smb_returns = None
+    hml_returns = None
+    if iwm_df is not None and spy_df is not None:
+        iwm_ret = iwm_df["close"].pct_change().dropna()
+        spy_ret_for_ff3 = spy_df["close"].pct_change().dropna()
+        common_ff = iwm_ret.index.intersection(spy_ret_for_ff3.index)
+        if len(common_ff) >= 60:
+            smb_returns = (iwm_ret.loc[common_ff] - spy_ret_for_ff3.loc[common_ff])
+    if iwd_df is not None and iwf_df is not None:
+        iwd_ret = iwd_df["close"].pct_change().dropna()
+        iwf_ret = iwf_df["close"].pct_change().dropna()
+        common_hml = iwd_ret.index.intersection(iwf_ret.index)
+        if len(common_hml) >= 60:
+            hml_returns = (iwd_ret.loc[common_hml] - iwf_ret.loc[common_hml])
+
+    snapshot_hour = _get_snapshot_hour()
+
     # ── Step 2: Compute per-ticker indicators ────────────────────────────
     for ticker in watchlist:
         df = ticker_dfs.get(ticker)
@@ -263,11 +331,16 @@ async def run_precompute_pipeline(ctx: AppContext) -> dict:
                 sma_ema, rsi, macd, atr_bb, sr,
                 ichimoku, vwap_data, obv_data, adx_data, stoch, fib, vol_profile,
             ]
-            bias, confidence, narrative = _synthesize_bias(all_signals)
+
+            # Pre-compute regime for regime-conditioned weighting
+            pre_regime_data = detect_regime_raw(df)
+            pre_regime = pre_regime_data.get("regime") if "error" not in pre_regime_data else None
+            bias, confidence, narrative = _synthesize_bias(all_signals, regime=pre_regime)
 
             tech_data = {
                 "ticker": ticker,
                 "indicator_date": today,
+                "snapshot_hour": snapshot_hour,
                 "run_id": run_id,
                 # Core indicators
                 "sma50": sma_ema["sma50"],
@@ -309,12 +382,19 @@ async def run_precompute_pipeline(ctx: AppContext) -> dict:
             async with get_db(ctx.db_path) as db:
                 await queries.store_technical_indicators(db, tech_data)
 
+            # Generate per-ticker narrative
+            last_close = float(df["close"].iloc[-1])
+            ticker_narrative = _generate_ticker_narrative(
+                ticker, tech_data, last_close, bias, confidence,
+            )
+            tech_data["narrative"] = ticker_narrative
+
             # ── Quant metrics ──
             returns = df["close"].pct_change().dropna()
 
             forecast = compute_return_forecast_raw(df)
             vol = compute_vol_forecast_raw(df)
-            regime = detect_regime_raw(df)
+            regime = pre_regime_data  # reuse already-computed regime
 
             # Factor exposures (needs SPY)
             beta_val = alpha_val = r_sq_val = None
@@ -355,10 +435,33 @@ async def run_precompute_pipeline(ctx: AppContext) -> dict:
                         kalman_beta = kalman_result.get("current_beta")
 
             ff3_betas = None
-            if spy_returns is not None and ticker_dfs.get("SPY") is not None:
-                # We need IWM, IWD, IWF for factor proxies — skip if not available
-                # (These are fetched only if in watchlist; store None otherwise)
-                pass  # FF3 requires additional ETF data not in batch download
+            if (
+                spy_returns is not None
+                and smb_returns is not None
+                and hml_returns is not None
+            ):
+                common_ff3 = (
+                    returns.index
+                    .intersection(spy_returns.index)
+                    .intersection(smb_returns.index)
+                    .intersection(hml_returns.index)
+                )
+                if len(common_ff3) >= 60:
+                    ff3_result = compute_fama_french_raw(
+                        returns.loc[common_ff3].values,
+                        spy_returns.loc[common_ff3].values,
+                        smb_returns.loc[common_ff3].values,
+                        hml_returns.loc[common_ff3].values,
+                    )
+                    if "error" not in ff3_result:
+                        ff3_betas = {
+                            "market": ff3_result["beta_market"],
+                            "smb": ff3_result["beta_smb"],
+                            "hml": ff3_result["beta_hml"],
+                            "alpha_ann_pct": ff3_result["alpha_annualized_pct"],
+                            "r_squared": ff3_result["r_squared"],
+                            "style": ff3_result["style"],
+                        }
 
             # Distribution metrics (inline — simple stats)
             skewness = float(returns.skew()) if len(returns) >= 30 else None
@@ -381,6 +484,7 @@ async def run_precompute_pipeline(ctx: AppContext) -> dict:
             quant_data = {
                 "ticker": ticker,
                 "metric_date": today,
+                "snapshot_hour": snapshot_hour,
                 "run_id": run_id,
                 "ewma_vol": vol.get("ewma_vol_annualized") if "error" not in vol else None,
                 "vol_regime": vol.get("vol_regime") if "error" not in vol else None,
@@ -477,6 +581,7 @@ async def run_precompute_pipeline(ctx: AppContext) -> dict:
 
                 risk_data = {
                     "risk_date": today,
+                    "snapshot_hour": snapshot_hour,
                     "run_id": run_id,
                     "var_95": round(var_95 * 100, 3),
                     "es_95": round(es_95 * 100, 3),
@@ -486,13 +591,41 @@ async def run_precompute_pipeline(ctx: AppContext) -> dict:
                     "asset_class_pcts": asset_class_pcts,
                 }
 
+                # Compute macro snapshot
+                macro = _compute_macro_snapshot(ticker_dfs)
+                risk_data.update(macro)
+
                 async with get_db(ctx.db_path) as db:
                     await queries.store_daily_risk_metrics(db, risk_data)
 
         except Exception as e:
             logger.exception(f"Portfolio risk computation failed: {e}")
 
-    # ── Step 4: Complete the run ─────────────────────────────────────────
+    # ── Step 4: Correlation matrix ──────────────────────────────────────
+    processed_tickers = [t for t in watchlist if t in ticker_dfs]
+    if len(processed_tickers) >= 2:
+        try:
+            await _compute_and_store_correlations(
+                ticker_dfs, processed_tickers, today, run_id, ctx,
+            )
+        except Exception as e:
+            logger.warning(f"Correlation snapshot failed: {e}")
+
+    # ── Step 5: Earnings calendar ────────────────────────────────────────
+    try:
+        from portfolio_advisor.tools.earnings import fetch_earnings_calendar_raw
+
+        equity_watchlist = [t for t in watchlist if t.upper() not in CRYPTO_MAP]
+        if equity_watchlist:
+            earnings_entries = fetch_earnings_calendar_raw(equity_watchlist)
+            async with get_db(ctx.db_path) as db:
+                for entry in earnings_entries:
+                    await queries.upsert_earnings_entry(db, entry)
+            logger.info(f"Earnings calendar: {len(earnings_entries)} entries updated")
+    except Exception as e:
+        logger.warning(f"Earnings calendar update failed: {e}")
+
+    # ── Step 6: Complete the run ─────────────────────────────────────────
     status = "completed" if not results["failed"] else "completed"
     error_msg = None
     if results["failed"]:
@@ -507,6 +640,274 @@ async def run_precompute_pipeline(ctx: AppContext) -> dict:
     )
     logger.info(results["summary"])
     return results
+
+
+# ── Helper: macro snapshot ──────────────────────────────────────────────────
+
+
+def _compute_macro_snapshot(ticker_dfs: dict[str, pd.DataFrame]) -> dict:
+    """Compute macro regime indicators from available ETF data.
+
+    Uses:
+    - TLT/IEF for yield curve slope proxy
+    - VIX-like volatility from SPY
+    - HYG for credit spread proxy
+    """
+    result = {}
+
+    # Yield curve proxy: TLT (long bonds) vs IEF (intermediate) price ratio
+    # When TLT underperforms IEF, yield curve is steepening
+    tlt = ticker_dfs.get("TLT")
+    ief = ticker_dfs.get("IEF")
+    if tlt is not None and ief is not None:
+        tlt_ret_20d = float(tlt["close"].iloc[-1] / tlt["close"].iloc[-20] - 1) if len(tlt) > 20 else 0
+        ief_ret_20d = float(ief["close"].iloc[-1] / ief["close"].iloc[-20] - 1) if len(ief) > 20 else 0
+        slope_proxy = round((ief_ret_20d - tlt_ret_20d) * 100, 2)
+        result["yield_curve_slope"] = slope_proxy
+        result["yield_curve_inverted"] = 1 if slope_proxy < -0.5 else 0
+
+    # VIX proxy from SPY realized vol
+    spy = ticker_dfs.get("SPY")
+    if spy is not None and len(spy) >= 30:
+        spy_returns = spy["close"].pct_change().dropna()
+        realized_vol = float(spy_returns.tail(21).std() * np.sqrt(252) * 100)
+        result["vix_level"] = round(realized_vol, 1)
+        if realized_vol < 15:
+            result["vix_regime"] = "low"
+        elif realized_vol < 20:
+            result["vix_regime"] = "normal"
+        elif realized_vol < 30:
+            result["vix_regime"] = "elevated"
+        else:
+            result["vix_regime"] = "extreme"
+
+    # Credit spread proxy: HYG return vs IEF return (spread widening = HYG underperforms)
+    hyg = ticker_dfs.get("HYG")
+    if hyg is not None and ief is not None and len(hyg) > 20:
+        hyg_ret_20d = float(hyg["close"].iloc[-1] / hyg["close"].iloc[-20] - 1)
+        ief_ret_20d_v2 = float(ief["close"].iloc[-1] / ief["close"].iloc[-20] - 1) if len(ief) > 20 else 0
+        credit_spread_change = round((ief_ret_20d_v2 - hyg_ret_20d) * 100, 2)
+        result["credit_spread"] = credit_spread_change
+
+    # Macro regime composite
+    vix_regime = result.get("vix_regime", "normal")
+    inverted = result.get("yield_curve_inverted", 0)
+    credit = result.get("credit_spread", 0)
+
+    if vix_regime in ("low", "normal") and not inverted and credit < 1:
+        result["macro_regime"] = "expansion"
+    elif vix_regime == "normal" and (inverted or credit > 0.5):
+        result["macro_regime"] = "slowdown"
+    elif vix_regime in ("elevated", "extreme") and (inverted or credit > 1):
+        result["macro_regime"] = "contraction"
+    elif vix_regime in ("low", "normal") and credit < 0:
+        result["macro_regime"] = "recovery"
+    else:
+        result["macro_regime"] = "expansion"
+
+    return result
+
+
+# ── Helper: correlation matrix ──────────────────────────────────────────────
+
+
+async def _compute_and_store_correlations(
+    ticker_dfs: dict[str, pd.DataFrame],
+    tickers: list[str],
+    today: str,
+    run_id: str,
+    ctx: AppContext,
+) -> None:
+    """Compute NxN correlation matrix and store as a snapshot."""
+    returns_dict = {}
+    for t in tickers:
+        df = ticker_dfs.get(t)
+        if df is not None and len(df) >= 30:
+            returns_dict[t] = df["close"].pct_change().dropna()
+
+    if len(returns_dict) < 2:
+        return
+
+    # Align dates
+    combined = pd.DataFrame(returns_dict).dropna()
+    if len(combined) < 30:
+        return
+
+    corr = combined.corr()
+
+    # Extract top correlations (excluding self-correlation)
+    pairs = []
+    cols = list(corr.columns)
+    for i in range(len(cols)):
+        for j in range(i + 1, len(cols)):
+            pairs.append({
+                "pair": f"{cols[i]}-{cols[j]}",
+                "correlation": round(float(corr.iloc[i, j]), 3),
+            })
+    pairs.sort(key=lambda x: abs(x["correlation"]), reverse=True)
+    top_corrs = pairs[:10]
+
+    # Diversification score: 1 - avg absolute correlation
+    n = len(cols)
+    if n > 1:
+        abs_corr_sum = sum(abs(float(corr.iloc[i, j]))
+                          for i in range(n) for j in range(i + 1, n))
+        pair_count = n * (n - 1) / 2
+        avg_abs_corr = abs_corr_sum / pair_count if pair_count > 0 else 0
+        div_score = round(1 - avg_abs_corr, 3)
+    else:
+        div_score = 0.0
+
+    # Simple cluster assignments via correlation threshold
+    clusters = {}
+    cluster_id = 0
+    assigned = set()
+    for t in cols:
+        if t in assigned:
+            continue
+        cluster_id += 1
+        clusters[t] = cluster_id
+        assigned.add(t)
+        for other in cols:
+            if other not in assigned:
+                c = float(corr.loc[t, other])
+                if c > 0.7:
+                    clusters[other] = cluster_id
+                    assigned.add(other)
+
+    # Flatten correlation matrix to dict
+    corr_dict = {}
+    for i in range(len(cols)):
+        for j in range(i + 1, len(cols)):
+            corr_dict[f"{cols[i]}-{cols[j]}"] = round(float(corr.iloc[i, j]), 3)
+
+    data = {
+        "snapshot_date": today,
+        "run_id": run_id,
+        "correlation_matrix": corr_dict,
+        "top_correlations": top_corrs,
+        "diversification_score": div_score,
+        "cluster_assignments": clusters,
+    }
+
+    async with get_db(ctx.db_path) as db:
+        await queries.store_correlation_snapshot(db, data)
+
+
+# ── Helper: narrative generation ────────────────────────────────────────────
+
+
+def _generate_ticker_narrative(
+    ticker: str, tech_data: dict, last_close: float,
+    bias: str, confidence: float,
+) -> str:
+    """Generate a structured human-readable narrative for a ticker. Pure Python, no LLM."""
+    parts = [f"{ticker}: {bias.replace('_', ' ').title()} ({confidence:.2f} conf)."]
+
+    # Price vs moving averages
+    sma50 = tech_data.get("sma50")
+    sma200 = tech_data.get("sma200")
+    if sma50 and sma200:
+        if last_close > sma50 > sma200:
+            parts.append(f"Price above SMA50 ({sma50:.1f}) and SMA200 ({sma200:.1f}), golden cross.")
+        elif last_close < sma50 < sma200:
+            parts.append(f"Price below SMA50 ({sma50:.1f}) and SMA200 ({sma200:.1f}), death cross.")
+        elif sma50 and last_close > sma50:
+            parts.append(f"Price above SMA50 ({sma50:.1f}).")
+
+    # RSI
+    rsi = tech_data.get("rsi_14")
+    if rsi is not None:
+        if rsi > 70:
+            parts.append(f"RSI={rsi:.0f} (overbought).")
+        elif rsi < 30:
+            parts.append(f"RSI={rsi:.0f} (oversold).")
+        else:
+            parts.append(f"RSI={rsi:.0f} (neutral).")
+
+    # MACD
+    macd_hist = tech_data.get("macd_histogram")
+    if macd_hist is not None:
+        direction = "bullish" if macd_hist > 0 else "bearish"
+        parts.append(f"MACD histogram {direction} ({macd_hist:.3f}).")
+
+    # ADX trend strength
+    adx = tech_data.get("adx")
+    if adx is not None:
+        if adx > 25:
+            parts.append(f"ADX={adx:.0f} (trending).")
+        else:
+            parts.append(f"ADX={adx:.0f} (ranging).")
+
+    # Stochastic
+    stoch_k = tech_data.get("stochastic_k")
+    if stoch_k is not None:
+        parts.append(f"Stoch %K={stoch_k:.0f}.")
+
+    # Key levels
+    r1 = tech_data.get("r1")
+    s1 = tech_data.get("s1")
+    if r1 and s1:
+        if last_close > 0:
+            r1_dist = abs(r1 - last_close) / last_close * 100
+            s1_dist = abs(last_close - s1) / last_close * 100
+            if r1_dist < 2:
+                parts.append(f"Near R1 resistance at {r1:.1f}.")
+            if s1_dist < 2:
+                parts.append(f"Near S1 support at {s1:.1f}.")
+
+    return " ".join(parts)
+
+
+def _generate_portfolio_narrative(
+    risk_data: dict | None,
+    macro_data: dict,
+    earnings_upcoming: list[dict] | None = None,
+) -> str:
+    """Generate a portfolio-level narrative. Pure Python, no LLM."""
+    parts = ["Portfolio:"]
+
+    if risk_data:
+        var_95 = risk_data.get("var_95")
+        beta = risk_data.get("portfolio_beta")
+        dd = risk_data.get("current_drawdown")
+        if var_95 is not None:
+            parts.append(f"VaR95={var_95:.2f}%.")
+        if beta is not None:
+            parts.append(f"Beta={beta:.2f}.")
+        if dd is not None and dd < -1:
+            parts.append(f"Current drawdown={dd:.1f}%.")
+
+        pcts = risk_data.get("asset_class_pcts", {})
+        if pcts:
+            alloc_parts = []
+            for cls, pct in pcts.items():
+                if pct > 0:
+                    alloc_parts.append(f"{pct:.0f}% {cls}")
+            if alloc_parts:
+                parts.append(f"Allocation: {', '.join(alloc_parts)}.")
+
+    # Macro
+    regime = macro_data.get("macro_regime", "unknown")
+    vix = macro_data.get("vix_level")
+    vix_regime = macro_data.get("vix_regime", "unknown")
+    slope = macro_data.get("yield_curve_slope")
+    parts.append(f"Macro regime: {regime}.")
+    if vix is not None:
+        parts.append(f"VIX={vix:.1f} ({vix_regime}).")
+    if slope is not None:
+        inverted = "inverted" if macro_data.get("yield_curve_inverted") else "normal"
+        parts.append(f"Yield curve {inverted} (slope={slope:.2f}).")
+
+    # Earnings
+    if earnings_upcoming:
+        upcoming_str = ", ".join(
+            f"{e['ticker']} ({e['earnings_date']})"
+            for e in earnings_upcoming[:3]
+        )
+        parts.append(f"Upcoming earnings: {upcoming_str}.")
+
+    return " ".join(parts)
 
 
 # ── @function_tool cache query tools (used by chat agent) ───────────────────
@@ -747,3 +1148,214 @@ async def get_signal_history(
             "latest_confidence": confidences[-1] if confidences else None,
         },
     })
+
+
+@function_tool
+async def get_intraday_changes(
+    ctx: RunContextWrapper[AppContext],
+    ticker: str,
+) -> str:
+    """Get intraday signal changes for a ticker (morning vs midday vs evening snapshots).
+
+    Shows how indicators evolved throughout the day. Useful for understanding
+    what changed since the morning pre-compute.
+    """
+    today = date.today().isoformat()
+    async with get_db(ctx.context.db_path) as db:
+        snapshots = await queries.get_intraday_snapshots(db, ticker, today)
+
+    if not snapshots:
+        return json.dumps({
+            "ticker": ticker, "date": today,
+            "has_data": False, "message": "No intraday snapshots found",
+        })
+
+    if len(snapshots) == 1:
+        return json.dumps({
+            "ticker": ticker, "date": today,
+            "has_data": True, "snapshot_count": 1,
+            "message": "Only one snapshot available today",
+            "snapshots": snapshots,
+        })
+
+    # Compare first and last snapshots
+    first = snapshots[0]
+    last = snapshots[-1]
+    changes = {}
+    for key in ("rsi_14", "macd_histogram", "adx", "stochastic_k", "bb_pct_b"):
+        v1 = first.get(key)
+        v2 = last.get(key)
+        if v1 is not None and v2 is not None:
+            changes[key] = {
+                "morning": round(v1, 2),
+                "latest": round(v2, 2),
+                "change": round(v2 - v1, 2),
+            }
+
+    bias_changed = first.get("overall_bias") != last.get("overall_bias")
+
+    return json.dumps({
+        "ticker": ticker, "date": today,
+        "has_data": True, "snapshot_count": len(snapshots),
+        "bias_changed": bias_changed,
+        "morning_bias": first.get("overall_bias"),
+        "latest_bias": last.get("overall_bias"),
+        "indicator_changes": changes,
+        "snapshots": snapshots,
+    })
+
+
+@function_tool
+async def get_indicator_trend(
+    ctx: RunContextWrapper[AppContext],
+    ticker: str,
+    indicator: str,
+    days: int = 14,
+) -> str:
+    """Get the historical trend of a specific indicator for a ticker.
+
+    Valid indicators: rsi_14, macd_line, macd_histogram, adx, stochastic_k,
+    stochastic_d, bb_pct_b, bb_bandwidth, atr_14, obv, vwap, sma50, sma200,
+    overall_bias, overall_confidence.
+    """
+    async with get_db(ctx.context.db_path) as db:
+        history = await queries.get_indicator_history(db, ticker, indicator, days)
+
+    if not history:
+        return json.dumps({
+            "ticker": ticker, "indicator": indicator, "days": days,
+            "has_data": False, "message": "No history found",
+        })
+
+    return json.dumps({
+        "ticker": ticker, "indicator": indicator, "days": days,
+        "has_data": True, "data_points": len(history),
+        "history": history,
+    }, default=str)
+
+
+@function_tool
+async def get_cached_macro(
+    ctx: RunContextWrapper[AppContext],
+) -> str:
+    """Get the latest pre-computed macro snapshot.
+
+    Returns yield curve slope/inversion, VIX level/regime, credit spread,
+    and composite macro regime (expansion/slowdown/contraction/recovery).
+    Updated 2-3x daily by the pre-compute pipeline.
+    """
+    async with get_db(ctx.context.db_path) as db:
+        risk = await queries.get_latest_risk_metrics(db)
+
+    if risk is None:
+        return json.dumps({"has_data": False, "message": "No macro data available"})
+
+    macro = {
+        "has_data": True,
+        "risk_date": risk.get("risk_date"),
+        "yield_curve_slope": risk.get("yield_curve_slope"),
+        "yield_curve_inverted": bool(risk.get("yield_curve_inverted")),
+        "vix_level": risk.get("vix_level"),
+        "vix_regime": risk.get("vix_regime"),
+        "credit_spread": risk.get("credit_spread"),
+        "macro_regime": risk.get("macro_regime"),
+        "portfolio_var_95": risk.get("var_95"),
+        "portfolio_beta": risk.get("portfolio_beta"),
+        "current_drawdown": risk.get("current_drawdown"),
+    }
+    return json.dumps(macro, default=str)
+
+
+@function_tool
+async def get_cached_correlations(
+    ctx: RunContextWrapper[AppContext],
+) -> str:
+    """Get the latest pre-computed correlation snapshot for watchlist tickers.
+
+    Returns top correlated pairs, diversification score, and cluster assignments.
+    Updated daily by the pre-compute pipeline.
+    """
+    async with get_db(ctx.context.db_path) as db:
+        snapshot = await queries.get_latest_correlation_snapshot(db)
+
+    if snapshot is None:
+        return json.dumps({"has_data": False, "message": "No correlation data available"})
+
+    return json.dumps({
+        "has_data": True,
+        "snapshot_date": snapshot.get("snapshot_date"),
+        "diversification_score": snapshot.get("diversification_score"),
+        "top_correlations": snapshot.get("top_correlations"),
+        "cluster_assignments": snapshot.get("cluster_assignments"),
+    }, default=str)
+
+
+@function_tool
+async def get_daily_analysis_snapshot(
+    ctx: RunContextWrapper[AppContext],
+) -> str:
+    """Get the complete daily analysis snapshot: all ticker narratives + portfolio narrative.
+
+    Returns a structured text summary of all pre-computed data for today.
+    This is the primary tool for getting a comprehensive market overview
+    without running any live analysis.
+    """
+    settings = get_settings()
+    today = date.today().isoformat()
+
+    async with get_db(ctx.context.db_path) as db:
+        prefs = await queries.get_user_preferences(db)
+        watchlist = prefs.get("watchlist", settings.default_watchlist)
+
+        # Get all ticker data
+        ticker_narratives = []
+        for ticker in watchlist:
+            tech = await queries.get_technical_indicators(db, ticker)
+            quant = await queries.get_quant_metrics(db, ticker)
+            if tech:
+                narrative = tech.get("narrative", f"{ticker}: No narrative available")
+                quant_summary = ""
+                if quant:
+                    parts = []
+                    if quant.get("garch_vol") is not None:
+                        parts.append(f"GARCH vol={quant['garch_vol']:.1f}%")
+                    if quant.get("hmm_state"):
+                        parts.append(f"HMM={quant['hmm_state']}")
+                    if quant.get("kalman_beta") is not None:
+                        parts.append(f"Kalman beta={quant['kalman_beta']:.2f}")
+                    if quant.get("return_1w_pct") is not None:
+                        parts.append(
+                            f"1w forecast={quant['return_1w_pct']:+.1f}% "
+                            f"[{quant.get('return_1w_ci_low', '?')}, "
+                            f"{quant.get('return_1w_ci_high', '?')}]"
+                        )
+                    if quant.get("regime"):
+                        parts.append(f"Regime: {quant['regime']}")
+                    if parts:
+                        quant_summary = " " + " ".join(parts) + "."
+                ticker_narratives.append(narrative + quant_summary)
+
+        # Get portfolio + macro narrative
+        risk = await queries.get_latest_risk_metrics(db)
+        upcoming = await queries.get_upcoming_earnings(db, days=7)
+
+    macro_data = {}
+    if risk:
+        macro_data = {
+            "macro_regime": risk.get("macro_regime"),
+            "vix_level": risk.get("vix_level"),
+            "vix_regime": risk.get("vix_regime"),
+            "yield_curve_slope": risk.get("yield_curve_slope"),
+            "yield_curve_inverted": risk.get("yield_curve_inverted"),
+            "credit_spread": risk.get("credit_spread"),
+        }
+    portfolio_narrative = _generate_portfolio_narrative(risk, macro_data, upcoming)
+
+    return json.dumps({
+        "date": today,
+        "ticker_count": len(ticker_narratives),
+        "ticker_narratives": ticker_narratives,
+        "portfolio_narrative": portfolio_narrative,
+        "has_earnings": len(upcoming) > 0 if upcoming else False,
+        "upcoming_earnings": upcoming[:5] if upcoming else [],
+    }, default=str)

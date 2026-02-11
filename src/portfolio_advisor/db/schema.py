@@ -105,6 +105,7 @@ CREATE TABLE IF NOT EXISTS technical_indicators (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     ticker TEXT NOT NULL,
     indicator_date TEXT NOT NULL,
+    snapshot_hour INTEGER DEFAULT 6,
     run_id TEXT,
     sma50 REAL,
     sma200 REAL,
@@ -139,13 +140,14 @@ CREATE TABLE IF NOT EXISTS technical_indicators (
     overall_confidence REAL,
     narrative TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
-    UNIQUE(ticker, indicator_date)
+    UNIQUE(ticker, indicator_date, snapshot_hour)
 );
 
 CREATE TABLE IF NOT EXISTS quant_metrics (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     ticker TEXT NOT NULL,
     metric_date TEXT NOT NULL,
+    snapshot_hour INTEGER DEFAULT 6,
     run_id TEXT,
     return_1w_pct REAL,
     return_1w_ci_low REAL,
@@ -177,12 +179,13 @@ CREATE TABLE IF NOT EXISTS quant_metrics (
     cornish_fisher_var REAL,
     evt_var REAL,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
-    UNIQUE(ticker, metric_date)
+    UNIQUE(ticker, metric_date, snapshot_hour)
 );
 
 CREATE TABLE IF NOT EXISTS daily_risk_metrics (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     risk_date TEXT NOT NULL,
+    snapshot_hour INTEGER DEFAULT 6,
     run_id TEXT,
     var_95 REAL,
     es_95 REAL,
@@ -193,8 +196,14 @@ CREATE TABLE IF NOT EXISTS daily_risk_metrics (
     stress_test_results TEXT,
     diversification_ratio REAL,
     entropy_score REAL,
+    yield_curve_slope REAL,
+    yield_curve_inverted INTEGER,
+    vix_level REAL,
+    vix_regime TEXT,
+    credit_spread REAL,
+    macro_regime TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
-    UNIQUE(risk_date)
+    UNIQUE(risk_date, snapshot_hour)
 );
 
 CREATE TABLE IF NOT EXISTS research_themes (
@@ -254,5 +263,38 @@ CREATE TABLE IF NOT EXISTS analysis_runs (
     status TEXT NOT NULL DEFAULT 'running' CHECK (status IN ('running', 'completed', 'failed')),
     duration_seconds REAL,
     error_message TEXT
+);
+
+-- ── v3 Tables ────────────────────────────────────────────────────────────────
+
+CREATE TABLE IF NOT EXISTS earnings_calendar (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ticker TEXT NOT NULL,
+    earnings_date TEXT NOT NULL,
+    earnings_time TEXT,
+    eps_estimate REAL,
+    revenue_estimate REAL,
+    eps_actual REAL,
+    revenue_actual REAL,
+    eps_surprise_pct REAL,
+    revenue_surprise_pct REAL,
+    status TEXT NOT NULL DEFAULT 'upcoming',
+    source TEXT DEFAULT 'yfinance',
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(ticker, earnings_date)
+);
+CREATE INDEX IF NOT EXISTS idx_earnings_calendar_date ON earnings_calendar(earnings_date);
+CREATE INDEX IF NOT EXISTS idx_earnings_calendar_ticker ON earnings_calendar(ticker);
+
+CREATE TABLE IF NOT EXISTS correlation_snapshot (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    snapshot_date TEXT NOT NULL,
+    run_id TEXT,
+    correlation_matrix TEXT NOT NULL,
+    top_correlations TEXT,
+    diversification_score REAL,
+    cluster_assignments TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(snapshot_date)
 );
 """

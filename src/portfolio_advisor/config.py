@@ -44,6 +44,10 @@ class Settings(BaseSettings):
     model_chat: str = "gpt-5.2"
     model_research: str = "gpt-5-mini"
     model_onboarding: str = "gpt-5-mini"
+    model_daily_synthesis: str = "gpt-5.2"
+
+    # Additional news check times (UTC hours, between main runs)
+    news_check_hours: list[int] = [9, 15]
 
     # Pre-computation
     precompute_enabled: bool = True
