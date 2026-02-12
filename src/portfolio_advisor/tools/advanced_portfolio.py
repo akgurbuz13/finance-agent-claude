@@ -65,7 +65,7 @@ def optimize_cvar_raw(
     alpha0 = np.percentile(-returns_matrix @ w0, beta * 100)
     x0 = np.concatenate([w0, [alpha0]])
 
-    bounds = [(0.01, 0.40) for _ in range(n_assets)] + [(-1.0, 1.0)]
+    bounds = [(0.0, 0.40) for _ in range(n_assets)] + [(-1.0, 1.0)]
     constraints = [{"type": "eq", "fun": lambda x: np.sum(x[:n_assets]) - 1.0}]
 
     result = minimize(cvar_objective, x0, method="SLSQP", bounds=bounds, constraints=constraints)
@@ -250,7 +250,7 @@ def optimize_max_diversification_raw(
         return -weighted_vol / port_vol if port_vol > 1e-10 else 0.0
 
     w0 = np.ones(n_assets) / n_assets
-    bounds = [(0.01, 0.40) for _ in range(n_assets)]
+    bounds = [(0.0, 0.40) for _ in range(n_assets)]
     constraints = [{"type": "eq", "fun": lambda w: np.sum(w) - 1.0}]
 
     result = minimize(neg_div_ratio, w0, method="SLSQP", bounds=bounds, constraints=constraints)
@@ -296,7 +296,7 @@ def optimize_entropy_raw(
         return float(np.sum(w_pos * np.log(w_pos)))
 
     w0 = np.ones(n_assets) / n_assets
-    bounds = [(0.01, 0.50) for _ in range(n_assets)]
+    bounds = [(0.0, 0.50) for _ in range(n_assets)]
     constraints = [{"type": "eq", "fun": lambda w: np.sum(w) - 1.0}]
 
     if target_return is not None:
@@ -493,21 +493,42 @@ async def optimize_entropy_weighted(
     return json.dumps(raw)
 
 
+# Ticker-specific transaction cost table (Concern #18)
+_TICKER_COST_BPS: dict[str, float] = {
+    # Large-cap ETFs — very liquid
+    "SPY": 2, "QQQ": 2, "IWM": 3, "EFA": 5, "EEM": 10,
+    "VNQ": 5, "XLE": 5, "XLK": 5, "XLF": 5,
+    "TLT": 3, "IEF": 3, "HYG": 5, "AGG": 3, "BND": 3, "LQD": 5,
+    "GLD": 3, "SLV": 5,
+    # Large-cap stocks
+    "AAPL": 5, "MSFT": 5, "NVDA": 5, "AMZN": 5, "GOOGL": 5, "META": 5, "TSLA": 5,
+    # Crypto — higher spread
+    "BTC": 25, "ETH": 25, "SOL": 35, "AVAX": 50,
+}
+_DEFAULT_COST_BPS = 10.0
+
+
+def _get_ticker_cost_bps(ticker: str) -> float:
+    """Get ticker-specific transaction cost in bps."""
+    return _TICKER_COST_BPS.get(ticker.upper(), _DEFAULT_COST_BPS)
+
+
 @function_tool
 async def compute_transaction_costs(
     ctx: RunContextWrapper[AppContext],
     current_weights_json: str,
     target_weights_json: str,
     portfolio_value: float = 100000.0,
-    cost_bps: float = 10.0,
+    cost_bps: float = 0.0,
 ) -> str:
-    """Compute transaction costs for rebalancing. Estimates turnover and total cost. current/target_weights_json: {ticker: weight_pct}."""
+    """Compute transaction costs for rebalancing with ticker-specific costs. Uses per-ticker cost model (ETFs 2-5bps, stocks 5bps, EM 10bps, crypto 25-50bps). Set cost_bps > 0 to override with flat rate. current/target_weights_json: {ticker: weight_pct}."""
     current = json.loads(current_weights_json)
     target = json.loads(target_weights_json)
 
     all_tickers = set(list(current.keys()) + list(target.keys()))
     total_turnover = 0.0
     trades = []
+    use_flat = cost_bps > 0
 
     for ticker in sorted(all_tickers):
         cur_w = current.get(ticker, 0.0)
@@ -516,7 +537,8 @@ async def compute_transaction_costs(
 
         if abs(delta) > 0.1:  # ignore sub-0.1% changes
             trade_value = abs(delta) / 100.0 * portfolio_value
-            cost = trade_value * cost_bps / 10000.0
+            ticker_bps = cost_bps if use_flat else _get_ticker_cost_bps(ticker)
+            cost = trade_value * ticker_bps / 10000.0
             total_turnover += abs(delta)
 
             trades.append({
@@ -526,6 +548,7 @@ async def compute_transaction_costs(
                 "delta_pct": round(delta, 2),
                 "action": "buy" if delta > 0 else "sell",
                 "trade_value": round(trade_value, 2),
+                "cost_bps": ticker_bps,
                 "estimated_cost": round(cost, 2),
             })
 

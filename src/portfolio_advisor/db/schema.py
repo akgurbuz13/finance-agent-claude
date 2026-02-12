@@ -202,6 +202,13 @@ CREATE TABLE IF NOT EXISTS daily_risk_metrics (
     vix_regime TEXT,
     credit_spread REAL,
     macro_regime TEXT,
+    yield_2y REAL,
+    yield_5y REAL,
+    yield_10y REAL,
+    yield_30y REAL,
+    yield_curve_source TEXT DEFAULT 'etf_proxy',
+    vix_source TEXT DEFAULT 'spy_proxy',
+    credit_spread_source TEXT DEFAULT 'etf_proxy',
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     UNIQUE(risk_date, snapshot_hour)
 );
@@ -260,7 +267,7 @@ CREATE TABLE IF NOT EXISTS analysis_runs (
     started_at TEXT NOT NULL DEFAULT (datetime('now')),
     completed_at TEXT,
     tickers_processed TEXT DEFAULT '[]',
-    status TEXT NOT NULL DEFAULT 'running' CHECK (status IN ('running', 'completed', 'failed')),
+    status TEXT NOT NULL DEFAULT 'running' CHECK (status IN ('running', 'completed', 'completed_with_errors', 'failed')),
     duration_seconds REAL,
     error_message TEXT
 );
@@ -296,5 +303,52 @@ CREATE TABLE IF NOT EXISTS correlation_snapshot (
     cluster_assignments TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     UNIQUE(snapshot_date)
+);
+
+-- ── v4 Tables ────────────────────────────────────────────────────────────────
+
+CREATE TABLE IF NOT EXISTS fundamentals (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ticker TEXT NOT NULL,
+    fetch_date TEXT NOT NULL,
+    pe_ratio REAL,
+    forward_pe REAL,
+    pb_ratio REAL,
+    ps_ratio REAL,
+    ev_ebitda REAL,
+    roe REAL,
+    roa REAL,
+    profit_margin REAL,
+    operating_margin REAL,
+    debt_to_equity REAL,
+    current_ratio REAL,
+    quick_ratio REAL,
+    revenue_growth_yoy REAL,
+    earnings_growth_yoy REAL,
+    dividend_yield REAL,
+    market_cap REAL,
+    sector TEXT,
+    industry TEXT,
+    analyst_rating TEXT,
+    analyst_target_price REAL,
+    analyst_count INTEGER,
+    raw_json TEXT,
+    source TEXT DEFAULT 'unknown',
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(ticker, fetch_date)
+);
+CREATE INDEX IF NOT EXISTS idx_fundamentals_ticker ON fundamentals(ticker);
+
+CREATE TABLE IF NOT EXISTS sentiment_metrics (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ticker TEXT NOT NULL,
+    fetch_date TEXT NOT NULL,
+    short_interest REAL,
+    short_pct_float REAL,
+    days_to_cover REAL,
+    short_volume_ratio REAL,
+    source TEXT DEFAULT 'unknown',
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(ticker, fetch_date)
 );
 """

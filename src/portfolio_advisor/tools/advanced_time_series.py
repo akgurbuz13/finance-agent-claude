@@ -127,8 +127,13 @@ def detect_change_points_raw(
             return {"error": "Zero variance in returns"}
 
         # Find significant change points (where CUSUM exceeds critical value)
-        # Critical value at 5%: ~1.36 for standardized CUSUM
-        critical = 1.36
+        # Sample-size dependent critical values for standardized CUSUM at 5%
+        if n < 50:
+            critical = 1.63
+        elif n < 100:
+            critical = 1.48
+        else:
+            critical = 1.36
         abs_cumsum = np.abs(cumsum_normalized)
 
         # Find peaks above critical value

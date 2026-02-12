@@ -1,0 +1,19 @@
+[Unit]
+Description=Portfolio Advisor — Multi-Agent Portfolio Advisory System
+After=network.target
+
+[Service]
+Type=simple
+User=portfolio-advisor
+Group=portfolio-advisor
+WorkingDirectory=/opt/portfolio-advisor
+ExecStart=/opt/portfolio-advisor/.venv/bin/portfolio-advisor
+Restart=always
+RestartSec=30
+EnvironmentFile=/opt/portfolio-advisor/.env
+MemoryMax=1G
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

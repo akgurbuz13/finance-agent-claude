@@ -56,6 +56,21 @@ class Settings(BaseSettings):
     # FRED API
     fred_api_key: str = ""
 
+    # Massive API — supports multiple comma-separated keys for rotation
+    # New field (preferred): PA_MASSIVE_API_KEYS=key1,key2,key3,key4
+    # Legacy single-key field still works: PA_MASSIVE_API_KEY=key1
+    massive_api_keys: str = ""
+    massive_api_key: str = ""  # legacy single-key (fallback)
+
+    # Alpha Vantage API — supports multiple comma-separated keys for rotation
+    # New field (preferred): PA_ALPHA_VANTAGE_API_KEYS=key1,key2
+    # Legacy single-key field still works: PA_ALPHA_VANTAGE_API_KEY=key1
+    alpha_vantage_api_keys: str = ""
+    alpha_vantage_api_key: str = ""  # legacy single-key (fallback)
+
+    # Health check
+    health_port: int = 8080
+
     # Onboarding
     onboarding_enabled: bool = True
 
@@ -67,6 +82,22 @@ class Settings(BaseSettings):
         "AAPL", "MSFT", "NVDA", "AMZN",
         "BTC", "ETH", "SOL", "AVAX",
     ]
+
+    def get_massive_keys(self) -> list[str]:
+        """Get list of Massive API keys (from comma-separated string or single key)."""
+        if self.massive_api_keys:
+            return [k.strip() for k in self.massive_api_keys.split(",") if k.strip()]
+        if self.massive_api_key:
+            return [self.massive_api_key]
+        return []
+
+    def get_alpha_vantage_keys(self) -> list[str]:
+        """Get list of Alpha Vantage API keys (from comma-separated string or single key)."""
+        if self.alpha_vantage_api_keys:
+            return [k.strip() for k in self.alpha_vantage_api_keys.split(",") if k.strip()]
+        if self.alpha_vantage_api_key:
+            return [self.alpha_vantage_api_key]
+        return []
 
 
 _settings: Settings | None = None

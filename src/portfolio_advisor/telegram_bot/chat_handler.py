@@ -49,6 +49,15 @@ async def handle_chat_message(update: Update, context: ContextTypes.DEFAULT_TYPE
     await _handle_chat(update, user_text, chat_id)
 
 
+def _get_providers():
+    """Get the singleton provider registry (set at startup in main.py)."""
+    try:
+        from portfolio_advisor.providers.registry import get_global_registry
+        return get_global_registry()
+    except Exception:
+        return None
+
+
 async def _handle_onboarding(
     update: Update,
     user_text: str,
@@ -69,6 +78,7 @@ async def _handle_onboarding(
         watchlist=watchlist,
         token_budget_remaining=settings.daily_token_budget,
         max_web_search_calls_daily=settings.max_web_searches_daily,
+        providers=_get_providers(),
     )
 
     try:
@@ -127,6 +137,7 @@ async def _handle_chat(update: Update, user_text: str, chat_id: int) -> None:
         watchlist=watchlist,
         token_budget_remaining=settings.daily_token_budget,
         max_web_search_calls_daily=settings.max_web_searches_daily,
+        providers=_get_providers(),
     )
 
     try:

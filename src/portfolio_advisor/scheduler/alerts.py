@@ -23,37 +23,80 @@ async def run_news_alert_pipeline(ctx: AppContext) -> dict:
     """Run the research agent and alert on new high-impact themes.
 
     Steps:
-    1. Call the research agent with the current watchlist.
-    2. Parse returned themes from the agent output.
-    3. Compare against existing themes in the research_themes table.
-    4. If new HIGH impact themes are found, send immediate Telegram alerts.
-    5. Store new themes and deactivate old ones.
+    1. Pre-fetch structured news from Massive (if available) for context.
+    2. Call the research agent with the current watchlist (batched if >15 tickers).
+    3. Parse returned themes from the agent output.
+    4. Compare against existing themes in the research_themes table.
+    5. If new HIGH impact themes are found, send immediate Telegram alerts.
+    6. Store new themes and deactivate old ones.
 
     Returns a summary dict with counts of new/existing/alerted themes.
     """
     settings = get_settings()
     today = date.today().isoformat()
 
-    # 1. Run research agent
-    prompt = (
-        f"Research current market-moving news and macro developments for: "
-        f"{', '.join(ctx.watchlist)}\n"
-        f"Date: {today}. Focus on high-impact themes that change the investment thesis."
-    )
+    # 1. Pre-fetch structured news for context enrichment (Phase 2.3)
+    news_context = ""
+    if ctx.providers is not None:
+        try:
+            articles = await ctx.providers.fetch_news(ctx.watchlist[:20], limit=15)
+            if articles:
+                news_parts = []
+                for a in articles[:10]:
+                    sentiments = a.get("sentiments", {})
+                    sent_str = ""
+                    if sentiments:
+                        sent_parts = [
+                            f"{t}={s['sentiment']}" for t, s in sentiments.items()
+                        ]
+                        sent_str = f" [Sentiment: {', '.join(sent_parts)}]"
+                    news_parts.append(f"- {a.get('title', '')}{sent_str}")
+                news_context = (
+                    "\n\nPre-fetched news with sentiment:\n" + "\n".join(news_parts)
+                )
+        except Exception as e:
+            logger.debug(f"News pre-fetch failed (non-critical): {e}")
 
-    try:
-        result = await Runner.run(
-            starting_agent=get_research_agent(),
-            input=prompt,
-            context=ctx,
+    # 2. Run research agent (batched for large watchlists — Phase 2.4)
+    all_raw_outputs = []
+    batch_size = 8
+    watchlist = ctx.watchlist
+
+    if len(watchlist) > 15:
+        # Batch into groups of 8
+        batches = [watchlist[i:i + batch_size] for i in range(0, len(watchlist), batch_size)]
+    else:
+        batches = [watchlist]
+
+    for batch in batches:
+        prompt = (
+            f"Research current market-moving news and macro developments for: "
+            f"{', '.join(batch)}\n"
+            f"Date: {today}. Focus on high-impact themes that change the investment thesis."
+            f"{news_context}"
         )
-        raw_output = result.final_output or ""
-    except Exception as e:
-        logger.error(f"Research agent failed in alert pipeline: {e}")
-        return {"error": str(e), "new_themes": 0, "alerts_sent": 0}
 
-    # 2. Parse themes from agent output
-    themes = _parse_themes(raw_output)
+        try:
+            result = await Runner.run(
+                starting_agent=get_research_agent(),
+                input=prompt,
+                context=ctx,
+            )
+            raw_output = result.final_output or ""
+            all_raw_outputs.append(raw_output)
+        except Exception as e:
+            logger.error(f"Research agent failed in alert pipeline: {e}")
+
+    if not all_raw_outputs:
+        return {"error": "All research batches failed", "new_themes": 0, "alerts_sent": 0}
+
+    raw_output = all_raw_outputs[0]  # For backward compat with single-batch path
+
+    # 3. Parse themes from all batch outputs (dedup across batches)
+    themes = []
+    for output in all_raw_outputs:
+        batch_themes = _parse_themes(output)
+        themes.extend(batch_themes)
     if not themes:
         logger.info("News alert pipeline: no themes parsed from research output")
         return {"new_themes": 0, "alerts_sent": 0, "parse_failed": not raw_output}

@@ -50,9 +50,10 @@ Weekly Orchestrator (gpt-5.2)
 ├── Portfolio Agent.as_tool() — 24 tools (core + CVaR/HRP/Kelly + advanced risk)
 └── Reporting Agent.as_tool()
 
-Chat Agent (gpt-5.2) — 33 tools (29 direct + 4 agent delegates), cache-first strategy
+Chat Agent (gpt-5.2) — 39 tools (35 direct + 4 agent delegates), cache-first strategy
 ├── 10 pre-computed cache tools (instant, 0 LLM cost)
-├── 2 market data + 4 macro + 2 earnings + 3 portfolio + 3 prefs + 3 DB + 1 web + 1 usage
+├── 2 market data + 4 macro + 2 earnings + 3 portfolio + 3 prefs + 3 DB + 1 web
+├── 6 v4 tools (news, fundamentals, valuation, analyst, short interest, dividends) + 1 usage
 ├── Technical Agent.as_tool() — 14 tools hidden (deep technical analysis)
 ├── Quantitative Agent.as_tool() — 23 tools hidden (quant models)
 ├── Portfolio Agent.as_tool() — 24 tools hidden (optimization + risk)
@@ -109,11 +110,12 @@ All agents typed as `Agent[AppContext]`. Every `@function_tool` receives `ctx: R
 
 ### Database Layer
 
-SQLite via aiosqlite. Three files: `db/schema.py` (DDL), `db/connection.py` (`init_db` + `get_db` context manager), `db/queries.py` (typed CRUD). 20 tables:
+SQLite via aiosqlite (WAL mode + 30s busy timeout). Three files: `db/schema.py` (DDL), `db/connection.py` (`init_db` + `get_db` context manager + migrations), `db/queries.py` (typed CRUD). 22 tables:
 
 - **v1**: user_preferences, portfolio_state, portfolio_history, daily_briefs, instrument_briefs, weekly_reports, price_cache, forecasts_log, token_usage
 - **v2**: technical_indicators, quant_metrics, daily_risk_metrics, research_themes, forecast_accuracy, onboarding_state, chat_history, analysis_runs
 - **v3**: earnings_calendar, correlation_snapshot (+ snapshot_hour column on v2 indicator tables, + macro columns on daily_risk_metrics)
+- **v4**: fundamentals, sentiment_metrics (+ yield/VIX/credit source columns on daily_risk_metrics)
 
 ### Runtime Flow
 
@@ -121,7 +123,7 @@ SQLite via aiosqlite. Three files: `db/schema.py` (DDL), `db/connection.py` (`in
 
 ### Key Files
 
-- `agents/chat.py` — Chat agent with 33 tools (29 direct + 4 agent-as-tool delegates)
+- `agents/chat.py` — Chat agent with 39 tools (35 direct + 4 agent-as-tool delegates)
 - `agents/orchestrator.py` — Daily + Weekly orchestrators + Daily Synthesis Agent
 - `agents/portfolio.py` — Portfolio agent with 24 tools (core + advanced optimization + risk)
 - `agents/quantitative.py` — Quant agent with 23 tools (core + time series + analytics)
@@ -141,6 +143,17 @@ SQLite via aiosqlite. Three files: `db/schema.py` (DDL), `db/connection.py` (`in
 - `telegram_bot/bot.py` — 15 command handlers (including /earnings, /news) + free-text chat handler
 - `telegram_bot/chat_handler.py` — Routes to onboarding or chat agent based on onboarding state
 - `config.py` — pydantic-settings with `PA_` prefix, per-agent model assignments
+- `providers/registry.py` — Provider fallback chains (Massive → Alpha Vantage → yfinance) with round-robin multi-key rotation
+- `providers/massive_provider.py` — Massive API (earnings, news, fundamentals, yields, short interest, dividends)
+- `providers/fred_provider.py` — FRED API (treasury yields, VIX, credit spread, generic series)
+- `providers/alpha_vantage_provider.py` — Alpha Vantage fundamentals fallback
+- `tools/fundamentals.py` — PE, PB, ROE, margins, analyst consensus tools
+- `tools/news_data.py` — Massive news with per-ticker sentiment
+- `tools/sentiment.py` — Short interest + squeeze risk scoring
+- `tools/corporate_actions.py` — Dividends + stock splits
+- `health.py` — HTTP health/status server (liveness + detailed status on port 8080)
+- `utils/circuit_breaker.py` — Circuit breaker (CLOSED → OPEN → HALF_OPEN)
+- `utils/retry.py` — Exponential backoff with jitter
 
 ### Agent Prompt Convention
 
@@ -150,4 +163,10 @@ Each agent file has a `*_INSTRUCTIONS` string constant with structured sections:
 
 Copy `.env.example` to `.env`. Required: `PA_OPENAI_API_KEY`, `PA_TELEGRAM_BOT_TOKEN`, `PA_TELEGRAM_CHAT_ID`. All settings use the `PA_` prefix.
 
-Key optional settings: `PA_MODEL_CHAT`, `PA_MODEL_TECHNICAL`, etc. for per-agent model selection (default: `gpt-5.2`). `PA_PRECOMPUTE_STALE_HOURS` controls cache freshness threshold. `PA_FRED_API_KEY` enables FRED economic data (optional — yield curve and macro regime work without it via yfinance). `PA_ONBOARDING_ENABLED` controls whether new users are guided through setup (default: `true`).
+Key optional settings: `PA_MODEL_CHAT`, `PA_MODEL_TECHNICAL`, etc. for per-agent model selection (default: `gpt-5.2`). `PA_PRECOMPUTE_STALE_HOURS` controls cache freshness threshold. `PA_ONBOARDING_ENABLED` controls whether new users are guided through setup (default: `true`).
+
+API keys (all optional — system degrades gracefully with ETF/yfinance fallbacks):
+- `PA_MASSIVE_API_KEYS` — Comma-separated Massive API keys for round-robin rotation (5 calls/min/key)
+- `PA_ALPHA_VANTAGE_API_KEYS` — Comma-separated Alpha Vantage keys (25 calls/day/key, 5/min)
+- `PA_FRED_API_KEY` — FRED API key for treasury yields, VIX, credit spread (120 calls/min)
+- Legacy single-key fields (`PA_MASSIVE_API_KEY`, `PA_ALPHA_VANTAGE_API_KEY`) also supported

@@ -70,6 +70,22 @@ from portfolio_advisor.tools.db_tools import (
 # Token tracking
 from portfolio_advisor.tools.token_tracking import get_usage_summary
 
+# News data (Massive API)
+from portfolio_advisor.tools.news_data import get_ticker_news
+
+# Fundamentals + analyst ratings
+from portfolio_advisor.tools.fundamentals import (
+    get_analyst_consensus,
+    get_fundamentals,
+    get_valuation_comparison,
+)
+
+# Sentiment (short interest)
+from portfolio_advisor.tools.sentiment import get_short_interest
+
+# Corporate actions (dividends)
+from portfolio_advisor.tools.corporate_actions import get_dividend_info
+
 
 CHAT_AGENT_INSTRUCTIONS = """\
 # Role
@@ -142,6 +158,14 @@ toolkit hidden from you — just describe what you need:
 - Use `get_earnings_results` for a ticker's earnings history and surprise data.
 - When discussing a ticker, note if it has earnings coming up.
 - For post-earnings analysis, delegate to `run_market_research` for analyst reactions.
+
+# Fundamentals & Sentiment
+- Use `get_fundamentals` for PE, PB, ROE, margins, debt ratios (cached 7 days).
+- Use `get_valuation_comparison` for side-by-side valuation across tickers.
+- Use `get_analyst_consensus` for analyst ratings and price targets.
+- Use `get_short_interest` for short interest, days-to-cover, and squeeze risk.
+- Use `get_dividend_info` for dividend yield, ex-dates, and payout history.
+- Use `get_ticker_news` for recent news with per-ticker sentiment scores.
 
 # Query & Explain (stored data)
 When the user asks about past analysis or reports:
@@ -245,6 +269,16 @@ def get_chat_agent() -> Agent[AppContext]:
                 query_forecasts_log,
                 # ── Web search ────────────────────────────────────────────
                 WebSearchTool(),
+                # ── News data (Massive API) ─────────────────────────────
+                get_ticker_news,
+                # ── Fundamentals + analyst ─────────────────────────────────
+                get_fundamentals,
+                get_valuation_comparison,
+                get_analyst_consensus,
+                # ── Sentiment (short interest) ─────────────────────────────
+                get_short_interest,
+                # ── Corporate actions (dividends) ──────────────────────────
+                get_dividend_info,
                 # ── Token tracking ────────────────────────────────────────
                 get_usage_summary,
                 # ── Specialist agent delegates (deep analysis) ────────────

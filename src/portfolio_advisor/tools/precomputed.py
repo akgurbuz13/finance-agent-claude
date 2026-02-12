@@ -183,6 +183,56 @@ def _synthesize_bias(
     return bias, round(confidence, 2), narrative
 
 
+# ── Data quality check (Concern #7) ─────────────────────────────────────────
+
+
+def _check_data_quality(df: pd.DataFrame, ticker: str) -> dict:
+    """Check for data quality issues: stale data, zero volume, large gaps.
+
+    Returns {is_valid: bool, warnings: list[str]}.
+    """
+    warnings = []
+
+    # Check if last trade is too old (> 5 business days)
+    if len(df) > 0:
+        last_date = df.index[-1]
+        now = pd.Timestamp.now()
+        if hasattr(last_date, "tz") and last_date.tz is not None:
+            now = now.tz_localize(last_date.tz)
+        bdays = pd.bdate_range(last_date, now)
+        if len(bdays) > 6:  # 5 bdays + today
+            warnings.append(f"Possibly delisted: last trade {len(bdays)-1} business days ago")
+
+    # Zero volume for 5+ consecutive days
+    if "volume" in df.columns:
+        vol = df["volume"]
+        if (vol == 0).all():
+            warnings.append("No volume data available (VWAP/OBV unreliable)")
+        else:
+            zero_streak = 0
+            max_streak = 0
+            for v in vol.values:
+                if v == 0:
+                    zero_streak += 1
+                    max_streak = max(max_streak, zero_streak)
+                else:
+                    zero_streak = 0
+            if max_streak >= 5:
+                warnings.append(f"Stale volume: {max_streak} consecutive zero-volume days")
+
+    # Price gap > 50% in single day (possible split/merger)
+    if len(df) > 1:
+        returns = df["close"].pct_change().dropna()
+        max_gap = float(returns.abs().max())
+        if max_gap > 0.5:
+            gap_date = returns.abs().idxmax()
+            warnings.append(
+                f"Large price gap ({max_gap:.0%}) on {gap_date:%Y-%m-%d} — possible split/merger"
+            )
+
+    return {"is_valid": len(warnings) == 0, "warnings": warnings}
+
+
 # ── Core pipeline (called by scheduler, not a tool) ─────────────────────────
 
 
@@ -269,24 +319,36 @@ async def run_precompute_pipeline(ctx: AppContext) -> dict:
     if spy_df is not None:
         spy_returns = spy_df["close"].pct_change().dropna()
 
-    # FF3 factor proxy returns
-    iwm_df = ticker_dfs.get("IWM")
-    iwd_df = ticker_dfs.get("IWD")
-    iwf_df = ticker_dfs.get("IWF")
+    # FF3 factor returns: try actual Kenneth French data first (Concern #5)
     smb_returns = None
     hml_returns = None
-    if iwm_df is not None and spy_df is not None:
-        iwm_ret = iwm_df["close"].pct_change().dropna()
-        spy_ret_for_ff3 = spy_df["close"].pct_change().dropna()
-        common_ff = iwm_ret.index.intersection(spy_ret_for_ff3.index)
-        if len(common_ff) >= 60:
-            smb_returns = (iwm_ret.loc[common_ff] - spy_ret_for_ff3.loc[common_ff])
-    if iwd_df is not None and iwf_df is not None:
-        iwd_ret = iwd_df["close"].pct_change().dropna()
-        iwf_ret = iwf_df["close"].pct_change().dropna()
-        common_hml = iwd_ret.index.intersection(iwf_ret.index)
-        if len(common_hml) >= 60:
-            hml_returns = (iwd_ret.loc[common_hml] - iwf_ret.loc[common_hml])
+    try:
+        from portfolio_advisor.providers.ken_french import fetch_french_factors
+        ff3_data = await fetch_french_factors(lookback_days=365)
+        if ff3_data is not None:
+            smb_returns = ff3_data["smb"]
+            hml_returns = ff3_data["hml"]
+            logger.info("Using actual Fama-French factors from Kenneth French library")
+    except Exception as e:
+        logger.debug(f"French factor fetch failed, using ETF proxies: {e}")
+
+    # ETF proxy fallback for FF3
+    if smb_returns is None or hml_returns is None:
+        iwm_df = ticker_dfs.get("IWM")
+        iwd_df = ticker_dfs.get("IWD")
+        iwf_df = ticker_dfs.get("IWF")
+        if smb_returns is None and iwm_df is not None and spy_df is not None:
+            iwm_ret = iwm_df["close"].pct_change().dropna()
+            spy_ret_for_ff3 = spy_df["close"].pct_change().dropna()
+            common_ff = iwm_ret.index.intersection(spy_ret_for_ff3.index)
+            if len(common_ff) >= 60:
+                smb_returns = (iwm_ret.loc[common_ff] - spy_ret_for_ff3.loc[common_ff])
+        if hml_returns is None and iwd_df is not None and iwf_df is not None:
+            iwd_ret = iwd_df["close"].pct_change().dropna()
+            iwf_ret = iwf_df["close"].pct_change().dropna()
+            common_hml = iwd_ret.index.intersection(iwf_ret.index)
+            if len(common_hml) >= 60:
+                hml_returns = (iwd_ret.loc[common_hml] - iwf_ret.loc[common_hml])
 
     snapshot_hour = _get_snapshot_hour()
 
@@ -296,6 +358,12 @@ async def run_precompute_pipeline(ctx: AppContext) -> dict:
         if df is None or len(df) < 30:
             results["failed"].append(ticker)
             continue
+
+        # Data quality check (Concern #7)
+        dq = _check_data_quality(df, ticker)
+        if dq["warnings"]:
+            for w in dq["warnings"]:
+                logger.warning(f"Data quality [{ticker}]: {w}")
 
         try:
             # ── Technical indicators ──
@@ -382,17 +450,49 @@ async def run_precompute_pipeline(ctx: AppContext) -> dict:
             async with get_db(ctx.db_path) as db:
                 await queries.store_technical_indicators(db, tech_data)
 
-            # Generate per-ticker narrative
+            # Generate per-ticker narrative (with data quality + fundamentals)
             last_close = float(df["close"].iloc[-1])
+
+            # Load cached fundamentals if available
+            _fund_data = None
+            try:
+                async with get_db(ctx.db_path) as db:
+                    _fund_data = await queries.get_fundamentals(db, ticker)
+            except Exception:
+                pass
+
             ticker_narrative = _generate_ticker_narrative(
                 ticker, tech_data, last_close, bias, confidence,
+                fundamentals=_fund_data,
             )
+            if dq["warnings"]:
+                ticker_narrative += " WARNINGS: " + "; ".join(dq["warnings"]) + "."
             tech_data["narrative"] = ticker_narrative
+
+            # Re-store with enriched narrative (fundamentals + data quality warnings)
+            async with get_db(ctx.db_path) as db:
+                await queries.store_technical_indicators(db, tech_data)
 
             # ── Quant metrics ──
             returns = df["close"].pct_change().dropna()
 
-            forecast = compute_return_forecast_raw(df)
+            # Pre-compute HMM state for regime-conditioned forecast (Concern #6)
+            _hmm_state = None
+            _hmm_state_means = None
+            if len(returns) >= 100:
+                try:
+                    _hmm_result = detect_regime_hmm_raw(returns.values)
+                    if "error" not in _hmm_result:
+                        _hmm_state = _hmm_result.get("current_state")
+                        state_means = _hmm_result.get("state_means")
+                        if state_means and isinstance(state_means, dict):
+                            _hmm_state_means = state_means
+                except Exception:
+                    pass  # HMM optional — falls back to non-regime forecast
+
+            forecast = compute_return_forecast_raw(
+                df, hmm_state=_hmm_state, hmm_state_means=_hmm_state_means
+            )
             vol = compute_vol_forecast_raw(df)
             regime = pre_regime_data  # reuse already-computed regime
 
@@ -417,11 +517,8 @@ async def run_precompute_pipeline(ctx: AppContext) -> dict:
                 if "error" not in garch_result:
                     garch_vol = garch_result.get("current_cond_vol_annualized")
 
-            hmm_state = None
-            if len(returns) >= 100:
-                hmm_result = detect_regime_hmm_raw(returns.values)
-                if "error" not in hmm_result:
-                    hmm_state = hmm_result.get("current_state")
+            # Reuse HMM result from forecast pre-computation
+            hmm_state = _hmm_state
 
             kalman_beta = None
             if spy_returns is not None:
@@ -591,8 +688,8 @@ async def run_precompute_pipeline(ctx: AppContext) -> dict:
                     "asset_class_pcts": asset_class_pcts,
                 }
 
-                # Compute macro snapshot
-                macro = _compute_macro_snapshot(ticker_dfs)
+                # Compute macro snapshot (async — uses providers if available)
+                macro = await _compute_macro_snapshot(ticker_dfs, providers=ctx.providers)
                 risk_data.update(macro)
 
                 async with get_db(ctx.db_path) as db:
@@ -625,8 +722,32 @@ async def run_precompute_pipeline(ctx: AppContext) -> dict:
     except Exception as e:
         logger.warning(f"Earnings calendar update failed: {e}")
 
-    # ── Step 6: Complete the run ─────────────────────────────────────────
-    status = "completed" if not results["failed"] else "completed"
+    # ── Step 6: Weekly fundamentals refresh (Monday only) ───────────────
+    import datetime as _dt
+    if _dt.date.today().weekday() == 0 and ctx.providers is not None:
+        try:
+            from portfolio_advisor.tools.fundamentals import fetch_fundamentals_raw
+
+            equity_watchlist = [t for t in watchlist if t.upper() not in CRYPTO_MAP]
+            fund_count = 0
+            for ticker in equity_watchlist:
+                try:
+                    fund_data = await fetch_fundamentals_raw(ticker, ctx.providers)
+                    if fund_data:
+                        fund_data["ticker"] = ticker
+                        fund_data["fetch_date"] = today
+                        async with get_db(ctx.db_path) as db:
+                            await queries.store_fundamentals(db, fund_data)
+                        fund_count += 1
+                except Exception as fund_err:
+                    logger.debug(f"Fundamentals fetch failed for {ticker}: {fund_err}")
+            if fund_count:
+                logger.info(f"Fundamentals refresh: {fund_count}/{len(equity_watchlist)} tickers")
+        except Exception as e:
+            logger.warning(f"Fundamentals refresh failed: {e}")
+
+    # ── Step 7: Complete the run ─────────────────────────────────────────
+    status = "completed" if not results["failed"] else "completed_with_errors"
     error_msg = None
     if results["failed"]:
         error_msg = f"Failed tickers: {', '.join(results['failed'])}"
@@ -645,62 +766,130 @@ async def run_precompute_pipeline(ctx: AppContext) -> dict:
 # ── Helper: macro snapshot ──────────────────────────────────────────────────
 
 
-def _compute_macro_snapshot(ticker_dfs: dict[str, pd.DataFrame]) -> dict:
-    """Compute macro regime indicators from available ETF data.
+async def _compute_macro_snapshot(
+    ticker_dfs: dict[str, pd.DataFrame],
+    providers=None,
+) -> dict:
+    """Compute macro regime indicators from API data or ETF proxies.
 
-    Uses:
-    - TLT/IEF for yield curve slope proxy
-    - VIX-like volatility from SPY
-    - HYG for credit spread proxy
+    Provider chain (with fallback to ETF proxies):
+    - Yields: Massive/FRED actual treasury yields -> TLT/IEF proxy
+    - VIX: FRED VIXCLS -> yfinance ^VIX -> SPY realized vol proxy
+    - Credit: FRED BAMLH0A0HYM2 -> HYG/IEF proxy
     """
     result = {}
 
-    # Yield curve proxy: TLT (long bonds) vs IEF (intermediate) price ratio
-    # When TLT underperforms IEF, yield curve is steepening
-    tlt = ticker_dfs.get("TLT")
-    ief = ticker_dfs.get("IEF")
-    if tlt is not None and ief is not None:
-        tlt_ret_20d = float(tlt["close"].iloc[-1] / tlt["close"].iloc[-20] - 1) if len(tlt) > 20 else 0
-        ief_ret_20d = float(ief["close"].iloc[-1] / ief["close"].iloc[-20] - 1) if len(ief) > 20 else 0
-        slope_proxy = round((ief_ret_20d - tlt_ret_20d) * 100, 2)
-        result["yield_curve_slope"] = slope_proxy
-        result["yield_curve_inverted"] = 1 if slope_proxy < -0.5 else 0
+    # ── Yield Curve ──────────────────────────────────────────────────────
+    yield_source = "etf_proxy"
+    if providers is not None:
+        yields_data, source = await providers.fetch_treasury_yields()
+        if yields_data:
+            yield_source = source
+            y2 = yields_data.get("2y")
+            y5 = yields_data.get("5y")
+            y10 = yields_data.get("10y")
+            y30 = yields_data.get("30y")
+            if y10 is not None:
+                result["yield_10y"] = y10
+            if y2 is not None:
+                result["yield_2y"] = y2
+            if y5 is not None:
+                result["yield_5y"] = y5
+            if y30 is not None:
+                result["yield_30y"] = y30
+            if y10 is not None and y2 is not None:
+                slope = round(y10 - y2, 3)
+                result["yield_curve_slope"] = slope
+                result["yield_curve_inverted"] = 1 if slope < 0 else 0
 
-    # VIX proxy from SPY realized vol
-    spy = ticker_dfs.get("SPY")
-    if spy is not None and len(spy) >= 30:
-        spy_returns = spy["close"].pct_change().dropna()
-        realized_vol = float(spy_returns.tail(21).std() * np.sqrt(252) * 100)
-        result["vix_level"] = round(realized_vol, 1)
-        if realized_vol < 15:
-            result["vix_regime"] = "low"
-        elif realized_vol < 20:
-            result["vix_regime"] = "normal"
-        elif realized_vol < 30:
-            result["vix_regime"] = "elevated"
-        else:
-            result["vix_regime"] = "extreme"
+    if "yield_curve_slope" not in result:
+        # ETF proxy fallback
+        tlt = ticker_dfs.get("TLT")
+        ief = ticker_dfs.get("IEF")
+        if tlt is not None and ief is not None:
+            tlt_ret_20d = float(tlt["close"].iloc[-1] / tlt["close"].iloc[-20] - 1) if len(tlt) > 20 else 0
+            ief_ret_20d = float(ief["close"].iloc[-1] / ief["close"].iloc[-20] - 1) if len(ief) > 20 else 0
+            slope_proxy = round((ief_ret_20d - tlt_ret_20d) * 100, 2)
+            result["yield_curve_slope"] = slope_proxy
+            result["yield_curve_inverted"] = 1 if slope_proxy < -0.5 else 0
 
-    # Credit spread proxy: HYG return vs IEF return (spread widening = HYG underperforms)
-    hyg = ticker_dfs.get("HYG")
-    if hyg is not None and ief is not None and len(hyg) > 20:
-        hyg_ret_20d = float(hyg["close"].iloc[-1] / hyg["close"].iloc[-20] - 1)
-        ief_ret_20d_v2 = float(ief["close"].iloc[-1] / ief["close"].iloc[-20] - 1) if len(ief) > 20 else 0
-        credit_spread_change = round((ief_ret_20d_v2 - hyg_ret_20d) * 100, 2)
-        result["credit_spread"] = credit_spread_change
+    result["yield_curve_source"] = yield_source
 
-    # Macro regime composite
+    # ── VIX ──────────────────────────────────────────────────────────────
+    vix_source = "spy_proxy"
+    if providers is not None:
+        vix_val, source = await providers.fetch_vix()
+        if vix_val is not None:
+            vix_source = source
+            result["vix_level"] = round(vix_val, 1)
+
+    if "vix_level" not in result:
+        # SPY realized vol proxy
+        spy = ticker_dfs.get("SPY")
+        if spy is not None and len(spy) >= 30:
+            spy_returns = spy["close"].pct_change().dropna()
+            realized_vol = float(spy_returns.tail(21).std() * np.sqrt(252) * 100)
+            result["vix_level"] = round(realized_vol, 1)
+
+    vix_level = result.get("vix_level", 20.0)
+    if vix_level < 15:
+        result["vix_regime"] = "low"
+    elif vix_level < 20:
+        result["vix_regime"] = "normal"
+    elif vix_level < 30:
+        result["vix_regime"] = "elevated"
+    else:
+        result["vix_regime"] = "extreme"
+
+    result["vix_source"] = vix_source
+
+    # ── Credit Spread ────────────────────────────────────────────────────
+    credit_source = "etf_proxy"
+    if providers is not None:
+        spread_val, source = await providers.fetch_credit_spread()
+        if spread_val is not None:
+            credit_source = source
+            # FRED BAMLH0A0HYM2 returns pct points (e.g. 4.5 = 4.5%);
+            # convert to bps for consistent units
+            credit_bps = spread_val * 100 if source == "fred" else spread_val
+            result["credit_spread"] = round(credit_bps, 2)
+
+    if "credit_spread" not in result:
+        # HYG/IEF proxy — relative return difference, not actual spread
+        hyg = ticker_dfs.get("HYG")
+        ief = ticker_dfs.get("IEF")
+        if hyg is not None and ief is not None and len(hyg) > 20:
+            hyg_ret_20d = float(hyg["close"].iloc[-1] / hyg["close"].iloc[-20] - 1)
+            ief_ret_20d_v2 = float(ief["close"].iloc[-1] / ief["close"].iloc[-20] - 1) if len(ief) > 20 else 0
+            credit_spread_change = round((ief_ret_20d_v2 - hyg_ret_20d) * 100, 2)
+            result["credit_spread"] = credit_spread_change
+
+    result["credit_spread_source"] = credit_source
+
+    # ── Macro Regime Composite ───────────────────────────────────────────
     vix_regime = result.get("vix_regime", "normal")
     inverted = result.get("yield_curve_inverted", 0)
-    credit = result.get("credit_spread", 0)
+    credit_raw = result.get("credit_spread", 0)
 
-    if vix_regime in ("low", "normal") and not inverted and credit < 1:
+    # Normalize credit thresholds based on source:
+    # - FRED (bps): stress > 500, elevated > 400, tight < 300
+    # - ETF proxy (relative perf %): stress > 1, elevated > 0.5, tight < 0
+    if credit_source in ("fred", "massive"):
+        credit_tight = credit_raw < 300
+        credit_elevated = credit_raw > 400
+        credit_stress = credit_raw > 500
+    else:
+        credit_tight = credit_raw < 0
+        credit_elevated = credit_raw > 0.5
+        credit_stress = credit_raw > 1
+
+    if vix_regime in ("low", "normal") and not inverted and not credit_elevated:
         result["macro_regime"] = "expansion"
-    elif vix_regime == "normal" and (inverted or credit > 0.5):
+    elif vix_regime == "normal" and (inverted or credit_elevated):
         result["macro_regime"] = "slowdown"
-    elif vix_regime in ("elevated", "extreme") and (inverted or credit > 1):
+    elif vix_regime in ("elevated", "extreme") and (inverted or credit_stress):
         result["macro_regime"] = "contraction"
-    elif vix_regime in ("low", "normal") and credit < 0:
+    elif vix_regime in ("low", "normal") and credit_tight:
         result["macro_regime"] = "recovery"
     else:
         result["macro_regime"] = "expansion"
@@ -758,22 +947,33 @@ async def _compute_and_store_correlations(
     else:
         div_score = 0.0
 
-    # Simple cluster assignments via correlation threshold
+    # Ward linkage clustering (Concern #16) — falls back to threshold for < 3 tickers
     clusters = {}
-    cluster_id = 0
-    assigned = set()
-    for t in cols:
-        if t in assigned:
-            continue
-        cluster_id += 1
-        clusters[t] = cluster_id
-        assigned.add(t)
-        for other in cols:
-            if other not in assigned:
-                c = float(corr.loc[t, other])
-                if c > 0.7:
-                    clusters[other] = cluster_id
-                    assigned.add(other)
+    if len(cols) >= 3:
+        try:
+            from portfolio_advisor.tools.advanced_analytics import compute_clustering_raw
+            cluster_result = compute_clustering_raw(combined.values, cols)
+            if "error" not in cluster_result:
+                clusters = cluster_result.get("cluster_assignments", {})
+        except Exception:
+            pass  # Fall back to threshold method
+
+    if not clusters:
+        # Simple threshold fallback
+        cluster_id = 0
+        assigned = set()
+        for t in cols:
+            if t in assigned:
+                continue
+            cluster_id += 1
+            clusters[t] = cluster_id
+            assigned.add(t)
+            for other in cols:
+                if other not in assigned:
+                    c = float(corr.loc[t, other])
+                    if c > 0.7:
+                        clusters[other] = cluster_id
+                        assigned.add(other)
 
     # Flatten correlation matrix to dict
     corr_dict = {}
@@ -800,6 +1000,7 @@ async def _compute_and_store_correlations(
 def _generate_ticker_narrative(
     ticker: str, tech_data: dict, last_close: float,
     bias: str, confidence: float,
+    fundamentals: dict | None = None,
 ) -> str:
     """Generate a structured human-readable narrative for a ticker. Pure Python, no LLM."""
     parts = [f"{ticker}: {bias.replace('_', ' ').title()} ({confidence:.2f} conf)."]
@@ -855,6 +1056,26 @@ def _generate_ticker_narrative(
                 parts.append(f"Near R1 resistance at {r1:.1f}.")
             if s1_dist < 2:
                 parts.append(f"Near S1 support at {s1:.1f}.")
+
+    # Fundamentals enrichment (Phase 3.9)
+    if fundamentals:
+        fund_parts = []
+        pe = fundamentals.get("pe_ratio")
+        if pe is not None:
+            fund_parts.append(f"PE={pe:.1f}")
+        analyst = fundamentals.get("analyst_rating")
+        target = fundamentals.get("analyst_target_price")
+        if analyst:
+            fund_parts.append(f"Analyst: {analyst}")
+        if target and last_close > 0:
+            upside = (target / last_close - 1) * 100
+            fund_parts.append(f"Target ${target:.0f} ({upside:+.0f}%)")
+        short_pct = fundamentals.get("short_pct_float")
+        if short_pct is not None:
+            level = "high" if short_pct > 10 else "moderate" if short_pct > 5 else "low"
+            fund_parts.append(f"Short {short_pct:.1f}% ({level})")
+        if fund_parts:
+            parts.append(" | ".join(fund_parts) + ".")
 
     return " ".join(parts)
 

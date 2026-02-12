@@ -19,11 +19,19 @@ logger = logging.getLogger(__name__)
 
 
 async def _build_context() -> AppContext:
-    """Build the shared AppContext for a run."""
+    """Build the shared AppContext for a run, including provider registry."""
     settings = get_settings()
     async with get_db(settings.db_path) as db:
         prefs = await queries.get_user_preferences(db)
     watchlist = prefs.get("watchlist", settings.default_watchlist)
+
+    # Get shared singleton provider registry (set at startup in main.py)
+    providers = None
+    try:
+        from portfolio_advisor.providers.registry import get_global_registry
+        providers = get_global_registry()
+    except Exception as e:
+        logger.warning(f"Failed to get provider registry: {e}")
 
     return AppContext(
         db_path=settings.db_path,
@@ -32,6 +40,7 @@ async def _build_context() -> AppContext:
         watchlist=watchlist,
         token_budget_remaining=settings.daily_token_budget,
         max_web_search_calls_daily=settings.max_web_searches_daily,
+        providers=providers,
     )
 
 
@@ -211,6 +220,38 @@ async def _build_daily_context(ctx: AppContext) -> str:
                     f"- {pos['ticker']}: {pos['weight_pct']:.1f}% ({pos.get('asset_class', '?')})"
                 )
             sections.append("")
+
+    # ── Market movers (from Massive, if available) ────────────────────
+    if ctx.providers is not None:
+        try:
+            movers = await ctx.providers.fetch_market_movers()
+            if movers:
+                gainers = movers.get("gainers", [])[:5]
+                losers = movers.get("losers", [])[:5]
+                if gainers or losers:
+                    sections.append("## Market Movers\n")
+                    if gainers:
+                        parts = [
+                            f"{m.get('ticker', '?')} {m.get('change_pct', 0):+.1f}%"
+                            for m in gainers
+                        ]
+                        sections.append(f"Top gainers: {', '.join(parts)}")
+                    if losers:
+                        parts = [
+                            f"{m.get('ticker', '?')} {m.get('change_pct', 0):+.1f}%"
+                            for m in losers
+                        ]
+                        sections.append(f"Top losers: {', '.join(parts)}")
+                    # Flag watchlist tickers in movers
+                    mover_tickers = {m.get("ticker") for m in gainers + losers}
+                    watchlist_movers = mover_tickers & set(ctx.watchlist)
+                    if watchlist_movers:
+                        sections.append(
+                            f"**Watchlist in movers:** {', '.join(sorted(watchlist_movers))}"
+                        )
+                    sections.append("")
+        except Exception:
+            pass  # Non-critical
 
     return "\n".join(sections)
 
@@ -515,6 +556,31 @@ async def evening_summary_job() -> None:
                 vol_regime = qm.get("vol_regime", "?")
                 ret_str = f" 1w forecast={ret_1w:+.1f}%" if ret_1w is not None else ""
                 lines.append(f"  {ticker}: {regime}/{vol_regime}{ret_str}")
+
+        # Forecast tracking (Concern #17): compare morning predictions vs current
+        async with get_db(settings.db_path) as db:
+            cursor = await db.execute(
+                """SELECT fl.ticker, fl.horizon, fl.predicted_value
+                   FROM forecasts_log fl
+                   WHERE fl.forecast_date = ?
+                   ORDER BY fl.ticker""",
+                (today,),
+            )
+            todays_forecasts = [dict(r) for r in await cursor.fetchall()]
+
+        if todays_forecasts:
+            lines.append("\n**Forecast Tracking:**")
+            for fc in todays_forecasts[:5]:
+                ticker = fc["ticker"]
+                try:
+                    pred = json.loads(fc.get("predicted_value", "{}"))
+                    pred_ret = pred.get("expected_return_pct", 0)
+                    horizon = fc.get("horizon", "1w")
+                    lines.append(
+                        f"  {ticker}: predicted {pred_ret:+.1f}% ({horizon})"
+                    )
+                except (json.JSONDecodeError, TypeError):
+                    pass
 
         # Risk snapshot
         if risk_metrics:

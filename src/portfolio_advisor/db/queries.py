@@ -798,7 +798,7 @@ async def get_signal_trend(
 # ── Daily Risk Metrics ───────────────────────────────────────────────────────
 
 async def store_daily_risk_metrics(db: aiosqlite.Connection, data: dict) -> None:
-    """Upsert daily risk metrics for the portfolio."""
+    """Upsert daily risk metrics for the portfolio (v4: includes actual yield/VIX sources)."""
     await db.execute(
         """INSERT INTO daily_risk_metrics (
                risk_date, snapshot_hour, run_id,
@@ -806,8 +806,10 @@ async def store_daily_risk_metrics(db: aiosqlite.Connection, data: dict) -> None
                portfolio_beta, asset_class_pcts, stress_test_results,
                diversification_ratio, entropy_score,
                yield_curve_slope, yield_curve_inverted, vix_level, vix_regime,
-               credit_spread, macro_regime
-           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+               credit_spread, macro_regime,
+               yield_2y, yield_5y, yield_10y, yield_30y,
+               yield_curve_source, vix_source, credit_spread_source
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT(risk_date, snapshot_hour) DO UPDATE SET
                run_id = excluded.run_id,
                var_95 = excluded.var_95, es_95 = excluded.es_95,
@@ -823,7 +825,14 @@ async def store_daily_risk_metrics(db: aiosqlite.Connection, data: dict) -> None
                vix_level = excluded.vix_level,
                vix_regime = excluded.vix_regime,
                credit_spread = excluded.credit_spread,
-               macro_regime = excluded.macro_regime""",
+               macro_regime = excluded.macro_regime,
+               yield_2y = excluded.yield_2y,
+               yield_5y = excluded.yield_5y,
+               yield_10y = excluded.yield_10y,
+               yield_30y = excluded.yield_30y,
+               yield_curve_source = excluded.yield_curve_source,
+               vix_source = excluded.vix_source,
+               credit_spread_source = excluded.credit_spread_source""",
         (
             data["risk_date"], data.get("snapshot_hour", 6), data.get("run_id"),
             data.get("var_95"), data.get("es_95"),
@@ -835,6 +844,11 @@ async def store_daily_risk_metrics(db: aiosqlite.Connection, data: dict) -> None
             data.get("yield_curve_slope"), data.get("yield_curve_inverted"),
             data.get("vix_level"), data.get("vix_regime"),
             data.get("credit_spread"), data.get("macro_regime"),
+            data.get("yield_2y"), data.get("yield_5y"),
+            data.get("yield_10y"), data.get("yield_30y"),
+            data.get("yield_curve_source", "etf_proxy"),
+            data.get("vix_source", "spy_proxy"),
+            data.get("credit_spread_source", "etf_proxy"),
         ),
     )
     await db.commit()
@@ -1056,6 +1070,141 @@ async def get_onboarding_state(db: aiosqlite.Connection) -> dict | None:
         except json.JSONDecodeError:
             d["steps_completed"] = []
     return d
+
+
+# ── Fundamentals ────────────────────────────────────────────────────────────
+
+async def store_fundamentals(db: aiosqlite.Connection, data: dict) -> None:
+    """Upsert fundamentals data for a ticker."""
+    await db.execute(
+        """INSERT INTO fundamentals (
+               ticker, fetch_date, pe_ratio, forward_pe, pb_ratio, ps_ratio,
+               ev_ebitda, roe, roa, profit_margin, operating_margin,
+               debt_to_equity, current_ratio, quick_ratio,
+               revenue_growth_yoy, earnings_growth_yoy,
+               dividend_yield, market_cap,
+               sector, industry, analyst_rating, analyst_target_price,
+               analyst_count, source, raw_json
+           ) VALUES (
+               ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+           )
+           ON CONFLICT(ticker, fetch_date) DO UPDATE SET
+               pe_ratio = excluded.pe_ratio,
+               forward_pe = excluded.forward_pe,
+               pb_ratio = excluded.pb_ratio,
+               ps_ratio = excluded.ps_ratio,
+               ev_ebitda = excluded.ev_ebitda,
+               roe = excluded.roe,
+               roa = excluded.roa,
+               profit_margin = excluded.profit_margin,
+               operating_margin = excluded.operating_margin,
+               debt_to_equity = excluded.debt_to_equity,
+               current_ratio = excluded.current_ratio,
+               quick_ratio = excluded.quick_ratio,
+               revenue_growth_yoy = excluded.revenue_growth_yoy,
+               earnings_growth_yoy = excluded.earnings_growth_yoy,
+               dividend_yield = excluded.dividend_yield,
+               market_cap = excluded.market_cap,
+               sector = excluded.sector,
+               industry = excluded.industry,
+               analyst_rating = excluded.analyst_rating,
+               analyst_target_price = excluded.analyst_target_price,
+               analyst_count = excluded.analyst_count,
+               source = excluded.source,
+               raw_json = excluded.raw_json""",
+        (
+            data["ticker"], data["fetch_date"],
+            data.get("pe_ratio"), data.get("forward_pe"),
+            data.get("pb_ratio"), data.get("ps_ratio"),
+            data.get("ev_ebitda"), data.get("roe"), data.get("roa"),
+            data.get("profit_margin"), data.get("operating_margin"),
+            data.get("debt_to_equity"), data.get("current_ratio"),
+            data.get("quick_ratio"),
+            data.get("revenue_growth_yoy"), data.get("earnings_growth_yoy"),
+            data.get("dividend_yield"), data.get("market_cap"),
+            data.get("sector"), data.get("industry"),
+            data.get("analyst_rating"), data.get("analyst_target_price"),
+            data.get("analyst_count"),
+            data.get("source", "unknown"),
+            data.get("raw_json"),
+        ),
+    )
+    await db.commit()
+
+
+async def get_fundamentals(db: aiosqlite.Connection, ticker: str) -> dict | None:
+    """Get the latest fundamentals for a ticker."""
+    cursor = await db.execute(
+        """SELECT * FROM fundamentals
+           WHERE ticker = ?
+           ORDER BY fetch_date DESC LIMIT 1""",
+        (ticker,),
+    )
+    row = await cursor.fetchone()
+    return dict(row) if row else None
+
+
+async def get_fundamentals_comparison(
+    db: aiosqlite.Connection, tickers: list[str]
+) -> list[dict]:
+    """Get latest fundamentals for multiple tickers."""
+    results = []
+    for ticker in tickers:
+        row = await get_fundamentals(db, ticker)
+        if row:
+            results.append(row)
+    return results
+
+
+# ── Sentiment Metrics ──────────────────────────────────────────────────────
+
+async def store_sentiment_metrics(db: aiosqlite.Connection, data: dict) -> None:
+    """Upsert sentiment/short-interest metrics for a ticker."""
+    await db.execute(
+        """INSERT INTO sentiment_metrics (
+               ticker, fetch_date, short_interest, short_pct_float,
+               days_to_cover, short_volume_ratio, source
+           ) VALUES (?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT(ticker, fetch_date) DO UPDATE SET
+               short_interest = excluded.short_interest,
+               short_pct_float = excluded.short_pct_float,
+               days_to_cover = excluded.days_to_cover,
+               short_volume_ratio = excluded.short_volume_ratio,
+               source = excluded.source""",
+        (
+            data["ticker"], data["fetch_date"],
+            data.get("short_interest"), data.get("short_pct_float"),
+            data.get("days_to_cover"), data.get("short_volume_ratio"),
+            data.get("source", "unknown"),
+        ),
+    )
+    await db.commit()
+
+
+async def get_sentiment_metrics(
+    db: aiosqlite.Connection, ticker: str,
+) -> dict | None:
+    """Get the latest sentiment metrics for a ticker."""
+    cursor = await db.execute(
+        """SELECT * FROM sentiment_metrics
+           WHERE ticker = ?
+           ORDER BY fetch_date DESC LIMIT 1""",
+        (ticker,),
+    )
+    row = await cursor.fetchone()
+    return dict(row) if row else None
+
+
+async def get_bulk_sentiment_metrics(
+    db: aiosqlite.Connection, tickers: list[str],
+) -> list[dict]:
+    """Get latest sentiment metrics for multiple tickers."""
+    results = []
+    for ticker in tickers:
+        row = await get_sentiment_metrics(db, ticker)
+        if row:
+            results.append(row)
+    return results
 
 
 async def update_onboarding_step(

@@ -112,7 +112,10 @@ def detect_regime_hmm_raw(
 
     Returns current state, state probabilities, transition matrix, expected durations.
     """
-    from hmmlearn.hmm import GaussianHMM
+    try:
+        from hmmlearn.hmm import GaussianHMM
+    except ImportError:
+        return {"error": "hmmlearn not installed (requires Python <3.14 or pre-built wheel)"}
 
     if len(returns) < 100:
         return {"error": "Insufficient data (need 100+ observations for HMM)"}

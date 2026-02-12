@@ -50,6 +50,29 @@ async def _migrate_preferences(db: aiosqlite.Connection) -> None:
     await db.commit()
 
 
+async def _migrate_v4(db: aiosqlite.Connection) -> None:
+    """Add v4 columns to daily_risk_metrics for actual macro data sources."""
+    v4_columns = [
+        ("yield_2y", "REAL"),
+        ("yield_5y", "REAL"),
+        ("yield_10y", "REAL"),
+        ("yield_30y", "REAL"),
+        ("yield_curve_source", "TEXT DEFAULT 'etf_proxy'"),
+        ("vix_source", "TEXT DEFAULT 'spy_proxy'"),
+        ("credit_spread_source", "TEXT DEFAULT 'etf_proxy'"),
+    ]
+    try:
+        existing = await _get_table_columns(db, "daily_risk_metrics")
+        for col_name, col_def in v4_columns:
+            if col_name not in existing:
+                sql = f"ALTER TABLE daily_risk_metrics ADD COLUMN {col_name} {col_def}"
+                await db.execute(sql)
+                logger.info(f"v4 migration: added column {col_name} to daily_risk_metrics")
+        await db.commit()
+    except Exception:
+        pass  # Table may not exist yet
+
+
 async def _migrate_v3_snapshot_hour(db: aiosqlite.Connection) -> None:
     """Add snapshot_hour column and recreate UNIQUE constraints for v3.
 
@@ -85,6 +108,16 @@ async def init_db(db_path: str) -> None:
     """Create tables if they don't exist and seed defaults."""
     os.makedirs(os.path.dirname(db_path) or ".", exist_ok=True)
     async with aiosqlite.connect(db_path) as db:
+        # Enable WAL mode and busy timeout for concurrent access
+        await db.execute("PRAGMA journal_mode=WAL")
+        await db.execute("PRAGMA busy_timeout=30000")
+        wal_mode = await db.execute("PRAGMA journal_mode")
+        row = await wal_mode.fetchone()
+        if row and row[0] == "wal":
+            logger.info("SQLite WAL mode enabled")
+        else:
+            logger.warning(f"SQLite WAL mode not active (got: {row})")
+
         # v3 migration must run BEFORE schema creation so tables are recreated
         try:
             await _migrate_v3_snapshot_hour(db)
@@ -103,12 +136,17 @@ async def init_db(db_path: str) -> None:
         # Run v2 migrations (safe to call repeatedly — idempotent)
         await _migrate_preferences(db)
 
+        # Run v4 migrations (add macro source columns + fundamentals table)
+        await _migrate_v4(db)
+
 
 @asynccontextmanager
 async def get_db(db_path: str) -> AsyncIterator[aiosqlite.Connection]:
-    """Yield an aiosqlite connection with row_factory enabled."""
+    """Yield an aiosqlite connection with row_factory enabled, WAL mode, and busy timeout."""
     db = await aiosqlite.connect(db_path)
     db.row_factory = aiosqlite.Row
+    await db.execute("PRAGMA journal_mode=WAL")
+    await db.execute("PRAGMA busy_timeout=30000")
     try:
         yield db
     finally:

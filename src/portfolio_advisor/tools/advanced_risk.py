@@ -119,9 +119,10 @@ def compute_evt_var_raw(
     else:
         evt_var = threshold + (scale / shape) * ((n_ratio / p) ** shape - 1)
 
-    # EVT ES (Expected Shortfall)
+    # EVT ES (Expected Shortfall) — correct GPD formula:
+    # ES = (VaR + scale - shape * threshold) / (1 - shape)
     if shape < 1:
-        evt_es = evt_var / (1 - shape) + (scale - shape * threshold) / (1 - shape)
+        evt_es = (evt_var + scale - shape * threshold) / (1 - shape)
     else:
         evt_es = evt_var * 1.5  # rough approximation when shape >= 1
 

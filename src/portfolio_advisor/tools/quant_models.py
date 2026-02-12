@@ -14,11 +14,19 @@ from portfolio_advisor.tools.technical_indicators import _prices_to_series
 # ── Pure computation functions (no ctx, return dicts) ────────────────────────
 
 
-def compute_return_forecast_raw(df) -> dict:
+def compute_return_forecast_raw(
+    df,
+    hmm_state: str | None = None,
+    hmm_state_means: dict | None = None,
+) -> dict:
     """Momentum + mean-reversion blend return forecast — pure function.
 
     Expects a DataFrame with a 'close' column (from _prices_to_series).
     Returns forecast dicts for 1w, 1m, 3m horizons.
+
+    Concern #6: When hmm_state and hmm_state_means are provided, blends
+    EWMA forecast with regime-conditional mean (50/50) for regime-conditioned
+    return estimates.
     """
     close = df["close"]
     returns = close.pct_change().dropna()
@@ -38,6 +46,15 @@ def compute_return_forecast_raw(df) -> dict:
     daily_vol = float(returns.std())
     annualized_vol = daily_vol * np.sqrt(252)
 
+    # Regime-conditional adjustment (Concern #6)
+    regime_adj = 0.0
+    regime_conditioned = False
+    if hmm_state and hmm_state_means:
+        state_mean = hmm_state_means.get(hmm_state)
+        if state_mean is not None:
+            regime_adj = float(state_mean)
+            regime_conditioned = True
+
     forecasts = {}
     for label, days, mom_w, mr_w in [
         ("1w", 5, 0.7, 0.3),
@@ -48,6 +65,12 @@ def compute_return_forecast_raw(df) -> dict:
         mr_component = -mr_signal * 0.5
         expected = mom_component * mom_w + mr_component * mr_w
         expected_horizon = expected * (days / 21)
+
+        # Blend with regime-conditional mean (50/50) when available
+        if regime_conditioned:
+            regime_horizon = regime_adj * days
+            expected_horizon = 0.5 * expected_horizon + 0.5 * regime_horizon
+
         ci_width = daily_vol * np.sqrt(days) * 1.96
 
         forecasts[label] = {
@@ -57,13 +80,17 @@ def compute_return_forecast_raw(df) -> dict:
             "confidence": round(max(0.3, min(0.8, 0.6 - abs(mr_signal))), 2),
         }
 
-    return {
+    result = {
         "annualized_vol": round(annualized_vol * 100, 2),
         "momentum_1m_pct": round(mom_1m * 100, 2),
         "momentum_3m_pct": round(mom_3m * 100, 2),
         "mean_reversion_signal": round(mr_signal * 100, 2),
+        "regime_conditioned": regime_conditioned,
         "forecasts": forecasts,
     }
+    if regime_conditioned:
+        result["hmm_state"] = hmm_state
+    return result
 
 
 def compute_vol_forecast_raw(df) -> dict:

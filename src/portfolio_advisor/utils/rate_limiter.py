@@ -9,6 +9,56 @@ import time
 logger = logging.getLogger(__name__)
 
 
+class AsyncTokenBucketRateLimiter:
+    """Async token-bucket rate limiter for external API providers.
+
+    Allows up to `max_tokens` calls, refilling at `refill_rate` tokens/second.
+    Callers await `acquire()` which blocks when the bucket is empty.
+    """
+
+    def __init__(self, name: str, max_tokens: int, refill_rate: float):
+        self.name = name
+        self.max_tokens = max_tokens
+        self.refill_rate = refill_rate  # tokens per second
+
+        self._tokens = float(max_tokens)
+        self._last_refill = time.monotonic()
+        self._lock = asyncio.Lock()
+
+    def _refill(self) -> None:
+        now = time.monotonic()
+        elapsed = now - self._last_refill
+        self._tokens = min(self.max_tokens, self._tokens + elapsed * self.refill_rate)
+        self._last_refill = now
+
+    async def acquire(self) -> None:
+        """Wait until a token is available, then consume one."""
+        while True:
+            async with self._lock:
+                self._refill()
+                if self._tokens >= 1.0:
+                    self._tokens -= 1.0
+                    return
+                # Calculate wait time until next token
+                wait = (1.0 - self._tokens) / self.refill_rate if self.refill_rate > 0 else 1.0
+
+            await asyncio.sleep(wait)
+
+    @property
+    def available(self) -> float:
+        """Approximate available tokens (may be slightly stale, safe for concurrent reads)."""
+        elapsed = time.monotonic() - self._last_refill
+        return min(self.max_tokens, self._tokens + elapsed * self.refill_rate)
+
+    def status(self) -> dict:
+        return {
+            "name": self.name,
+            "available_tokens": round(self.available, 1),
+            "max_tokens": self.max_tokens,
+            "refill_rate_per_sec": self.refill_rate,
+        }
+
+
 class TokenBudgetEnforcer:
     """Tracks token usage and enforces daily budget limits."""
 

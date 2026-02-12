@@ -264,13 +264,26 @@ async def get_economic_calendar(
 async def compute_macro_regime(
     ctx: RunContextWrapper[AppContext],
 ) -> str:
-    """Compute current macro regime from yield curve + credit spread + market momentum. Returns: expansion, slowdown, contraction, or recovery. Uses yfinance data (no API key needed)."""
+    """Compute current macro regime from yield curve + credit spread + market momentum. Returns: expansion, slowdown, contraction, or recovery. Uses provider APIs with yfinance fallback."""
     import yfinance as yf
 
     signals = {}
+    providers = getattr(ctx.context, "providers", None)
 
-    # 1. Yield curve slope (10Y - 3M)
-    yields = _fetch_treasury_yields()
+    # 1. Yield curve slope (10Y - 3M) — try providers first
+    yields = None
+    if providers is not None:
+        try:
+            yields_data, source = await providers.fetch_treasury_yields()
+            if yields_data:
+                yields = yields_data
+                signals["yield_source"] = source
+        except Exception:
+            pass
+    if yields is None:
+        yields = _fetch_treasury_yields()
+        signals["yield_source"] = "yfinance"
+
     if yields and "10y" in yields and "3m" in yields:
         slope = yields["10y"] - yields["3m"]
         signals["yield_curve_slope"] = round(slope, 3)
@@ -283,21 +296,42 @@ async def compute_macro_regime(
     else:
         signals["yield_curve_signal"] = "unavailable"
 
-    # 2. Credit spread proxy: HYG vs IEF (high yield vs investment grade)
-    try:
-        credit_data = yf.download(["HYG", "IEF"], period="6mo", progress=False)
-        if not credit_data.empty:
-            hyg_ret = credit_data["Close"]["HYG"].pct_change().dropna()
-            ief_ret = credit_data["Close"]["IEF"].pct_change().dropna()
-            spread_proxy = (ief_ret - hyg_ret).rolling(21).mean().iloc[-1]
-            signals["credit_spread_proxy"] = round(float(spread_proxy) * 252 * 100, 2)
-            signals["credit_signal"] = (
-                "stress" if spread_proxy > 0.001 else
-                "tightening" if spread_proxy < -0.001 else
-                "neutral"
-            )
-    except Exception:
-        signals["credit_signal"] = "unavailable"
+    # 2. Credit spread — try providers first
+    credit_fetched = False
+    if providers is not None:
+        try:
+            credit_data, source = await providers.fetch_credit_spread()
+            if credit_data is not None:
+                # FRED BAMLH0A0HYM2 returns pct points (e.g. 4.5);
+                # convert to bps for consistent thresholds
+                credit_bps = credit_data * 100 if source == "fred" else credit_data
+                signals["credit_spread_bps"] = round(credit_bps, 2)
+                signals["credit_source"] = source
+                signals["credit_signal"] = (
+                    "stress" if credit_bps > 500 else
+                    "elevated" if credit_bps > 400 else
+                    "tightening" if credit_bps < 300 else
+                    "neutral"
+                )
+                credit_fetched = True
+        except Exception:
+            pass
+    if not credit_fetched:
+        try:
+            credit_etf = yf.download(["HYG", "IEF"], period="6mo", progress=False)
+            if not credit_etf.empty:
+                hyg_ret = credit_etf["Close"]["HYG"].pct_change().dropna()
+                ief_ret = credit_etf["Close"]["IEF"].pct_change().dropna()
+                spread_proxy = (ief_ret - hyg_ret).rolling(21).mean().iloc[-1]
+                signals["credit_spread_proxy"] = round(float(spread_proxy) * 252 * 100, 2)
+                signals["credit_source"] = "etf_proxy"
+                signals["credit_signal"] = (
+                    "stress" if spread_proxy > 0.001 else
+                    "tightening" if spread_proxy < -0.001 else
+                    "neutral"
+                )
+        except Exception:
+            signals["credit_signal"] = "unavailable"
 
     # 3. Equity momentum: SPY 50d vs 200d SMA
     try:
@@ -319,20 +353,38 @@ async def compute_macro_regime(
     except Exception:
         signals["equity_signal"] = "unavailable"
 
-    # 4. VIX level
-    try:
-        vix = yf.download("^VIX", period="1mo", progress=False)
-        if not vix.empty:
-            vix_level = float(vix["Close"].iloc[-1])
-            signals["vix"] = round(vix_level, 2)
-            signals["vol_signal"] = (
-                "panic" if vix_level > 30 else
-                "elevated" if vix_level > 20 else
-                "calm" if vix_level < 15 else
-                "normal"
-            )
-    except Exception:
-        signals["vol_signal"] = "unavailable"
+    # 4. VIX level — try providers first
+    vix_fetched = False
+    if providers is not None:
+        try:
+            vix_data, source = await providers.fetch_vix()
+            if vix_data is not None:
+                signals["vix"] = round(vix_data, 2)
+                signals["vix_source"] = source
+                signals["vol_signal"] = (
+                    "panic" if vix_data > 30 else
+                    "elevated" if vix_data > 20 else
+                    "calm" if vix_data < 15 else
+                    "normal"
+                )
+                vix_fetched = True
+        except Exception:
+            pass
+    if not vix_fetched:
+        try:
+            vix = yf.download("^VIX", period="1mo", progress=False)
+            if not vix.empty:
+                vix_level = float(vix["Close"].iloc[-1])
+                signals["vix"] = round(vix_level, 2)
+                signals["vix_source"] = "yfinance"
+                signals["vol_signal"] = (
+                    "panic" if vix_level > 30 else
+                    "elevated" if vix_level > 20 else
+                    "calm" if vix_level < 15 else
+                    "normal"
+                )
+        except Exception:
+            signals["vol_signal"] = "unavailable"
 
     # Composite regime determination
     regime_scores = {"expansion": 0, "slowdown": 0, "contraction": 0, "recovery": 0}
