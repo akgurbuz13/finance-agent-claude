@@ -1,4 +1,16 @@
-"""APScheduler 4.x setup and lifecycle."""
+"""APScheduler 4.x setup and lifecycle.
+
+Slim schedule (3 LLM jobs/day + 2 data-only):
+  06:00 — precompute (no LLM, batch data + indicators)
+  06:30 — daily brief (LLM: analysis + news research)
+  20:00 — evening summary (LLM: end-of-day recap + news)
+  22:00 — forecast eval (no LLM, accuracy tracking)
+  Sun 18:00 — weekly report (LLM: full portfolio review)
+
+Removed: midday precompute/update, standalone news checks.
+The daily brief and evening summary already include news research,
+so separate news_check jobs are redundant and waste tokens.
+"""
 
 from __future__ import annotations
 
@@ -31,8 +43,6 @@ async def start_scheduler() -> None:
         daily_job,
         evening_summary_job,
         forecast_evaluation_job,
-        midday_update_job,
-        news_check_job,
         precompute_job,
         weekly_job,
     )
@@ -54,12 +64,6 @@ async def start_scheduler() -> None:
         "daily_monitoring", func=daily_job, misfire_grace_time=3600
     )
     await scheduler.configure_task(
-        "precompute_midday", func=precompute_job, misfire_grace_time=3600
-    )
-    await scheduler.configure_task(
-        "midday_update", func=midday_update_job, misfire_grace_time=3600
-    )
-    await scheduler.configure_task(
         "evening_summary", func=evening_summary_job, misfire_grace_time=3600
     )
     await scheduler.configure_task(
@@ -69,37 +73,25 @@ async def start_scheduler() -> None:
         "forecast_eval", func=forecast_evaluation_job, misfire_grace_time=3600
     )
 
-    for i, hour in enumerate(settings.news_check_hours):
-        await scheduler.configure_task(
-            f"news_check_{i}", func=news_check_job, misfire_grace_time=3600
-        )
-
     # ── Register schedules (scheduler must be running) ───────────────────
 
+    # Morning: batch data crunch (no LLM cost)
     await scheduler.add_schedule(
         func_or_task_id="precompute_morning",
         trigger=CronTrigger(hour=settings.morning_run_hour, minute=0, timezone="UTC"),
         id="precompute_morning_schedule",
         conflict_policy="replace",
     )
+
+    # Morning: daily brief with news research (LLM)
     await scheduler.add_schedule(
         func_or_task_id="daily_monitoring",
         trigger=CronTrigger(hour=settings.morning_run_hour, minute=30, timezone="UTC"),
         id="daily_monitoring_schedule",
         conflict_policy="replace",
     )
-    await scheduler.add_schedule(
-        func_or_task_id="precompute_midday",
-        trigger=CronTrigger(hour=settings.midday_run_hour, minute=0, timezone="UTC"),
-        id="precompute_midday_schedule",
-        conflict_policy="replace",
-    )
-    await scheduler.add_schedule(
-        func_or_task_id="midday_update",
-        trigger=CronTrigger(hour=settings.midday_run_hour, minute=30, timezone="UTC"),
-        id="midday_update_schedule",
-        conflict_policy="replace",
-    )
+
+    # Evening: end-of-day recap (LLM)
     await scheduler.add_schedule(
         func_or_task_id="evening_summary",
         trigger=CronTrigger(hour=settings.evening_run_hour, minute=0, timezone="UTC"),
@@ -107,6 +99,7 @@ async def start_scheduler() -> None:
         conflict_policy="replace",
     )
 
+    # Weekly: full portfolio review (LLM)
     day_map = {"mon": 0, "tue": 1, "wed": 2, "thu": 3, "fri": 4, "sat": 5, "sun": 6}
     day_of_week = day_map.get(settings.weekly_run_day.lower(), 6)
     await scheduler.add_schedule(
@@ -120,6 +113,8 @@ async def start_scheduler() -> None:
         id="weekly_report_schedule",
         conflict_policy="replace",
     )
+
+    # Forecast eval: accuracy tracking (no LLM cost)
     await scheduler.add_schedule(
         func_or_task_id="forecast_eval",
         trigger=CronTrigger(hour=22, minute=0, timezone="UTC"),
@@ -127,21 +122,10 @@ async def start_scheduler() -> None:
         conflict_policy="replace",
     )
 
-    for i, hour in enumerate(settings.news_check_hours):
-        await scheduler.add_schedule(
-            func_or_task_id=f"news_check_{i}",
-            trigger=CronTrigger(hour=hour, minute=0, timezone="UTC"),
-            id=f"news_check_{i}_schedule",
-            conflict_policy="replace",
-        )
-
-    news_hours_str = ", ".join(f"{h}:00" for h in settings.news_check_hours)
     logger.info(
         f"Scheduler configured: "
-        f"precompute at {settings.morning_run_hour}:00/{settings.midday_run_hour}:00, "
-        f"daily at {settings.morning_run_hour}:30, "
-        f"midday at {settings.midday_run_hour}:30, "
-        f"news checks at {news_hours_str}, "
+        f"precompute at {settings.morning_run_hour}:00, "
+        f"daily brief at {settings.morning_run_hour}:30, "
         f"evening at {settings.evening_run_hour}:00, "
         f"weekly on {settings.weekly_run_day} at {settings.weekly_run_hour}:00, "
         f"forecast eval at 22:00 UTC"
