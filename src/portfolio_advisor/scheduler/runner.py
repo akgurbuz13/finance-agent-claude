@@ -75,6 +75,8 @@ async def start_scheduler() -> None:
     """
     settings = get_settings()
     scheduler = get_scheduler()
+    # APScheduler 4.x requires __aenter__ before any method calls
+    await scheduler.__aenter__()
     await scheduler.start_in_background()
     logger.info("Scheduler started in background")
 
@@ -153,7 +155,14 @@ async def start_scheduler() -> None:
 
 
 async def stop_scheduler() -> None:
-    """Stop the scheduler."""
+    """Stop the scheduler and clean up."""
     scheduler = get_scheduler()
-    await scheduler.stop()
+    try:
+        await scheduler.stop()
+    except Exception:
+        pass
+    try:
+        await scheduler.__aexit__(None, None, None)
+    except Exception:
+        pass
     logger.info("Scheduler stopped")
