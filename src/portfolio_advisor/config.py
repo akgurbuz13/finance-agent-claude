@@ -27,8 +27,8 @@ class Settings(BaseSettings):
     evening_run_hour: int = 20
 
     # Token budgets
-    daily_token_budget: int = 100_000
-    weekly_token_budget: int = 200_000
+    daily_token_budget: int = 200_000
+    weekly_token_budget: int = 1200000
     max_web_searches_daily: int = 20
 
     # Models — legacy (kept for backward compat)
