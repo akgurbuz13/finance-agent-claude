@@ -91,26 +91,26 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """List all commands."""
     help_text = (
         "*Available Commands*\n\n"
-        "/start \\- Welcome & initialize\n"
-        "/status \\- System status\n"
-        "/portfolio \\- Current allocations\n"
-        "/prefs \\- Show preferences\n"
-        "/set \\<key\\> \\<value\\> \\- Update preference\n"
-        "/watchlist \\- Show watchlist\n"
-        "/addticker TSLA GOOG \\- Add tickers\n"
-        "/removeticker IWM \\- Remove tickers\n"
-        "/confirm \\<ticker\\> \\<weight\\> \\- Confirm trade\n"
-        "/brief \\- Latest daily brief\n"
-        "/report \\- Latest weekly report\n"
-        "/earnings \\- Upcoming & recent earnings\n"
-        "/news \\- On\\-demand news research\n"
-        "/usage \\- Token usage & cost\n"
-        "/rundaily \\- Force daily run\n"
-        "/runweekly \\- Force weekly run\n"
-        "/help \\- This message\n\n"
-        "_Or just type any question for live analysis\\!_"
+        "/start - Welcome & initialize\n"
+        "/status - System status\n"
+        "/portfolio - Current allocations\n"
+        "/prefs - Show preferences\n"
+        "/set <key> <value> - Update preference\n"
+        "/watchlist - Show watchlist\n"
+        "/addticker TSLA GOOG - Add tickers\n"
+        "/removeticker IWM - Remove tickers\n"
+        "/confirm <ticker> <weight> - Confirm trade\n"
+        "/brief - Latest daily brief\n"
+        "/report - Latest weekly report\n"
+        "/earnings - Upcoming & recent earnings\n"
+        "/news - On-demand news research\n"
+        "/usage - Token usage & cost\n"
+        "/rundaily - Force daily run\n"
+        "/runweekly - Force weekly run\n"
+        "/help - This message\n\n"
+        "_Or just type any question for live analysis!_"
     )
-    await update.message.reply_text(help_text, parse_mode="MarkdownV2")
+    await update.message.reply_text(help_text, parse_mode="Markdown")
 
 
 @_auth
@@ -134,7 +134,7 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
     status_text = format_status(last_daily, last_weekly, f"{settings.daily_run_hour}:00 UTC daily", f"{settings.weekly_run_day} {settings.weekly_run_hour}:00 UTC")
     try:
-        await update.message.reply_text(status_text, parse_mode="MarkdownV2")
+        await update.message.reply_text(status_text, parse_mode="Markdown")
     except Exception:
         await update.message.reply_text(status_text)
 
@@ -149,7 +149,7 @@ async def cmd_portfolio(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     cash = round(100.0 - total, 2)
     text = format_portfolio_table(positions, cash)
     try:
-        await update.message.reply_text(text, parse_mode="MarkdownV2")
+        await update.message.reply_text(text, parse_mode="Markdown")
     except Exception:
         await update.message.reply_text(text)
 
@@ -162,7 +162,7 @@ async def cmd_prefs(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         prefs = await queries.get_user_preferences(db)
     text = format_preferences(prefs)
     try:
-        await update.message.reply_text(text, parse_mode="MarkdownV2")
+        await update.message.reply_text(text, parse_mode="Markdown")
     except Exception:
         await update.message.reply_text(text)
 
@@ -218,7 +218,7 @@ async def cmd_watchlist(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     watchlist = prefs.get("watchlist", [])
     text = format_watchlist(watchlist)
     try:
-        await update.message.reply_text(text, parse_mode="MarkdownV2")
+        await update.message.reply_text(text, parse_mode="Markdown")
     except Exception:
         await update.message.reply_text(text)
 
@@ -352,7 +352,7 @@ async def cmd_usage(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     summary["period_days"] = 30
     text = format_usage(summary)
     try:
-        await update.message.reply_text(text, parse_mode="MarkdownV2")
+        await update.message.reply_text(text, parse_mode="Markdown")
     except Exception:
         await update.message.reply_text(text)
 

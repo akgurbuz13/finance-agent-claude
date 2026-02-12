@@ -167,11 +167,10 @@ async def _handle_chat(update: Update, user_text: str, chat_id: int) -> None:
         # Send response, handling Telegram's message length limit
         response_text = truncate_for_telegram(response_text)
 
-        # Try MarkdownV2 first, fall back to plain text
+        # Try Markdown (legacy) first, fall back to plain text
         try:
-            await update.message.reply_text(response_text, parse_mode="MarkdownV2")
+            await update.message.reply_text(response_text, parse_mode="Markdown")
         except Exception:
-            # Fallback: strip markdown and send plain
             await update.message.reply_text(response_text)
 
     except Exception as e:

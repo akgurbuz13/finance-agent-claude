@@ -3,18 +3,10 @@
 from __future__ import annotations
 
 
-def escape_md(text: str) -> str:
-    """Escape special characters for Telegram MarkdownV2."""
-    special = r"_[]()~`>#+-=|{}.!"
-    for ch in special:
-        text = text.replace(ch, f"\\{ch}")
-    return text
-
-
 def format_portfolio_table(positions: list[dict], cash_pct: float) -> str:
     """Format portfolio positions as a readable table."""
     if not positions:
-        return "*Portfolio*: 100% Cash\nNo positions yet\\."
+        return "*Portfolio*: 100% Cash\nNo positions yet."
 
     lines = ["*Current Portfolio*", ""]
     lines.append("`Ticker   Weight  Class`")
@@ -66,7 +58,7 @@ def format_watchlist(watchlist: list[str]) -> str:
     commodities = [t for t in watchlist if t in commodity_set]
     crypto = [t for t in watchlist if t in crypto_set]
 
-    lines = [f"*Watchlist* \\({len(watchlist)} tickers\\)", ""]
+    lines = [f"*Watchlist* ({len(watchlist)} tickers)", ""]
     if equities:
         lines.append(f"Equities: `{' '.join(sorted(equities))}`")
     if bonds:
@@ -88,7 +80,7 @@ def format_usage(summary: dict) -> str:
         f"Total Calls: `{summary.get('total_calls', 0)}`",
         f"Input Tokens: `{summary.get('total_input_tokens', 0):,}`",
         f"Output Tokens: `{summary.get('total_output_tokens', 0):,}`",
-        f"Est\\. Cost: `${summary.get('total_cost_usd', 0):.4f}`",
+        f"Est. Cost: `${summary.get('total_cost_usd', 0):.4f}`",
         "",
         f"Today Used: `{summary.get('today_tokens_used', 0):,}` tokens",
         f"Today Remaining: `{summary.get('today_budget_remaining', 0):,}` tokens",
@@ -96,7 +88,12 @@ def format_usage(summary: dict) -> str:
     return "\n".join(lines)
 
 
-def format_status(last_daily: str | None, last_weekly: str | None, next_daily: str | None, next_weekly: str | None) -> str:
+def format_status(
+    last_daily: str | None,
+    last_weekly: str | None,
+    next_daily: str | None,
+    next_weekly: str | None,
+) -> str:
     """Format system status."""
     lines = [
         "*System Status*",
@@ -113,4 +110,4 @@ def truncate_for_telegram(text: str, max_len: int = 4096) -> str:
     """Truncate message to Telegram's limit, preserving markdown structure."""
     if len(text) <= max_len:
         return text
-    return text[: max_len - 20] + "\n\n_\\.\\.\\. truncated_"
+    return text[: max_len - 20] + "\n\n... truncated"
