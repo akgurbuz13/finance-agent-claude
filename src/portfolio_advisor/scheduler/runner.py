@@ -21,8 +21,12 @@ def get_scheduler() -> AsyncScheduler:
     return _scheduler
 
 
-async def setup_scheduler() -> AsyncScheduler:
-    """Configure task definitions on the scheduler (before it is started)."""
+async def start_scheduler() -> None:
+    """Initialize the scheduler, configure tasks, and register all cron schedules.
+
+    APScheduler 4.x requires __aenter__ before any method calls including
+    configure_task() and add_schedule().
+    """
     from portfolio_advisor.scheduler.jobs import (
         daily_job,
         evening_summary_job,
@@ -36,51 +40,41 @@ async def setup_scheduler() -> AsyncScheduler:
     settings = get_settings()
     scheduler = get_scheduler()
 
-    # Configure all tasks (this does not require the scheduler to be running)
-    scheduler.configure_task(
-        "precompute_morning", func=precompute_job, misfire_grace_time=3600
-    )
-    scheduler.configure_task(
-        "daily_monitoring", func=daily_job, misfire_grace_time=3600
-    )
-    scheduler.configure_task(
-        "precompute_midday", func=precompute_job, misfire_grace_time=3600
-    )
-    scheduler.configure_task(
-        "midday_update", func=midday_update_job, misfire_grace_time=3600
-    )
-    scheduler.configure_task(
-        "evening_summary", func=evening_summary_job, misfire_grace_time=3600
-    )
-    scheduler.configure_task(
-        "weekly_report", func=weekly_job, misfire_grace_time=3600
-    )
-    scheduler.configure_task(
-        "forecast_eval", func=forecast_evaluation_job, misfire_grace_time=3600
-    )
-
-    for i, hour in enumerate(settings.news_check_hours):
-        scheduler.configure_task(
-            f"news_check_{i}", func=news_check_job, misfire_grace_time=3600
-        )
-
-    return scheduler
-
-
-async def start_scheduler() -> None:
-    """Start the scheduler and register all cron schedules.
-
-    add_schedule() requires the scheduler to be initialized (started),
-    so schedules are registered here after start_in_background().
-    """
-    settings = get_settings()
-    scheduler = get_scheduler()
     # APScheduler 4.x requires __aenter__ before any method calls
     await scheduler.__aenter__()
     await scheduler.start_in_background()
     logger.info("Scheduler started in background")
 
-    # ── Register schedules (scheduler must be running) ──────────────────
+    # ── Configure tasks (requires initialized scheduler) ─────────────────
+
+    await scheduler.configure_task(
+        "precompute_morning", func=precompute_job, misfire_grace_time=3600
+    )
+    await scheduler.configure_task(
+        "daily_monitoring", func=daily_job, misfire_grace_time=3600
+    )
+    await scheduler.configure_task(
+        "precompute_midday", func=precompute_job, misfire_grace_time=3600
+    )
+    await scheduler.configure_task(
+        "midday_update", func=midday_update_job, misfire_grace_time=3600
+    )
+    await scheduler.configure_task(
+        "evening_summary", func=evening_summary_job, misfire_grace_time=3600
+    )
+    await scheduler.configure_task(
+        "weekly_report", func=weekly_job, misfire_grace_time=3600
+    )
+    await scheduler.configure_task(
+        "forecast_eval", func=forecast_evaluation_job, misfire_grace_time=3600
+    )
+
+    for i, hour in enumerate(settings.news_check_hours):
+        await scheduler.configure_task(
+            f"news_check_{i}", func=news_check_job, misfire_grace_time=3600
+        )
+
+    # ── Register schedules (scheduler must be running) ───────────────────
 
     await scheduler.add_schedule(
         func_or_task_id="precompute_morning",

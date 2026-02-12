@@ -7,7 +7,7 @@ import os
 
 from portfolio_advisor.config import get_settings
 from portfolio_advisor.db.connection import init_db
-from portfolio_advisor.scheduler.runner import setup_scheduler, start_scheduler, stop_scheduler
+from portfolio_advisor.scheduler.runner import start_scheduler, stop_scheduler
 from portfolio_advisor.telegram_bot.bot import build_application
 from portfolio_advisor.utils.logging import setup_logging
 
@@ -49,8 +49,7 @@ async def startup(app) -> None:
     except Exception as e:
         logging.getLogger(__name__).warning(f"Health server failed to start: {e}")
 
-    # Setup and start scheduler
-    await setup_scheduler()
+    # Start scheduler (configures tasks + registers schedules)
     await start_scheduler()
 
     # Update health check scheduler status
