@@ -81,7 +81,7 @@ async def setup_scheduler() -> AsyncScheduler:
 
     # 1. Pre-compute morning (before daily monitoring)
     await scheduler.add_schedule(
-        task_id="precompute_morning",
+        func_or_task_id="precompute_morning",
         trigger=CronTrigger(hour=settings.morning_run_hour, minute=0, timezone="UTC"),
         id="precompute_morning_schedule",
         conflict_policy="replace",
@@ -89,7 +89,7 @@ async def setup_scheduler() -> AsyncScheduler:
 
     # 2. Daily monitoring (30 min after pre-compute)
     await scheduler.add_schedule(
-        task_id="daily_monitoring",
+        func_or_task_id="daily_monitoring",
         trigger=CronTrigger(hour=settings.morning_run_hour, minute=30, timezone="UTC"),
         id="daily_monitoring_schedule",
         conflict_policy="replace",
@@ -97,7 +97,7 @@ async def setup_scheduler() -> AsyncScheduler:
 
     # 3. Pre-compute midday refresh
     await scheduler.add_schedule(
-        task_id="precompute_midday",
+        func_or_task_id="precompute_midday",
         trigger=CronTrigger(hour=settings.midday_run_hour, minute=0, timezone="UTC"),
         id="precompute_midday_schedule",
         conflict_policy="replace",
@@ -105,7 +105,7 @@ async def setup_scheduler() -> AsyncScheduler:
 
     # 4. Midday update (delta-focused)
     await scheduler.add_schedule(
-        task_id="midday_update",
+        func_or_task_id="midday_update",
         trigger=CronTrigger(hour=settings.midday_run_hour, minute=30, timezone="UTC"),
         id="midday_update_schedule",
         conflict_policy="replace",
@@ -113,7 +113,7 @@ async def setup_scheduler() -> AsyncScheduler:
 
     # 5. Evening summary
     await scheduler.add_schedule(
-        task_id="evening_summary",
+        func_or_task_id="evening_summary",
         trigger=CronTrigger(hour=settings.evening_run_hour, minute=0, timezone="UTC"),
         id="evening_summary_schedule",
         conflict_policy="replace",
@@ -124,7 +124,7 @@ async def setup_scheduler() -> AsyncScheduler:
     day_of_week = day_map.get(settings.weekly_run_day.lower(), 6)
 
     await scheduler.add_schedule(
-        task_id="weekly_report",
+        func_or_task_id="weekly_report",
         trigger=CronTrigger(
             day_of_week=day_of_week,
             hour=settings.weekly_run_hour,
@@ -137,7 +137,7 @@ async def setup_scheduler() -> AsyncScheduler:
 
     # 7. Forecast evaluation (late evening)
     await scheduler.add_schedule(
-        task_id="forecast_eval",
+        func_or_task_id="forecast_eval",
         trigger=CronTrigger(hour=22, minute=0, timezone="UTC"),
         id="forecast_eval_schedule",
         conflict_policy="replace",
@@ -146,7 +146,7 @@ async def setup_scheduler() -> AsyncScheduler:
     # 8+. Additional news check jobs (configurable hours, default 09:00 and 15:00)
     for i, hour in enumerate(settings.news_check_hours):
         await scheduler.add_schedule(
-            task_id=f"news_check_{i}",
+            func_or_task_id=f"news_check_{i}",
             trigger=CronTrigger(hour=hour, minute=0, timezone="UTC"),
             id=f"news_check_{i}_schedule",
             conflict_policy="replace",
