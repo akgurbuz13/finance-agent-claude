@@ -290,6 +290,14 @@ async def cmd_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             asset_class = _classify(ticker)
             await queries.update_portfolio_position(db, ticker, weight, asset_class)
             action = "Updated"
+
+            # Auto-sync: ensure portfolio tickers are on the watchlist
+            prefs = await queries.get_user_preferences(db)
+            watchlist = prefs.get("watchlist", [])
+            if ticker not in [t.upper() for t in watchlist]:
+                watchlist.append(ticker)
+                await queries.update_user_preference(db, "watchlist", watchlist)
+
         await queries.snapshot_portfolio(db, trigger="user_confirmed")
 
     await update.message.reply_text(f"{action} {ticker} → {weight}%")

@@ -39,7 +39,8 @@ async def update_portfolio(
     new_weight_pct: float,
     reason: str = "",
 ) -> str:
-    """Update a portfolio position (user-confirmed trade). Set weight to 0 to remove."""
+    """Update a portfolio position (user-confirmed trade). Set weight to 0 to remove.
+    Automatically adds the ticker to the watchlist so it is tracked by scheduled analysis."""
     asset_class = _classify_asset(ticker)
 
     async with get_db(ctx.context.db_path) as db:
@@ -49,6 +50,13 @@ async def update_portfolio(
         else:
             await queries.update_portfolio_position(db, ticker, new_weight_pct, asset_class)
             action = "updated"
+
+            # Auto-sync: ensure portfolio tickers are on the watchlist
+            prefs = await queries.get_user_preferences(db)
+            watchlist = prefs.get("watchlist", [])
+            if ticker.upper() not in [t.upper() for t in watchlist]:
+                watchlist.append(ticker.upper())
+                await queries.update_user_preference(db, "watchlist", watchlist)
 
         # Snapshot after change
         await queries.snapshot_portfolio(db, trigger="user_confirmed")
